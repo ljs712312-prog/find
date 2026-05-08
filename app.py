@@ -19,7 +19,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 📌 3. 데이터 로딩 (두 개의 압축 파일 로드)
+# 📌 3. 데이터 로딩 (한글/영문 칼럼명 자동 호환 로직 추가)
 @st.cache_data
 def load_all_data():
     master_file = "suwon_building_master_v3.csv.gz"
@@ -30,12 +30,30 @@ def load_all_data():
         return None, None
         
     try:
-        # 마스터 데이터 (건물 기본 정보)
+        # 마스터 데이터 (표제부)
         df_m = pd.read_csv(master_file, dtype=str)
         df_m['clean_addr'] = df_m['platPlc'].str.replace(" ", "")
         
         # 층별 데이터 (상세 용도)
         df_f = pd.read_csv(floor_file, dtype=str)
+        
+        # 🚨 [핵심 수정] 다운로드 받은 파일이 한글 칼럼일 경우 파이썬이 인식하도록 자동 변환
+        col_mapping = {
+            '관리건축물대장pk': 'mgmBldrgstPk',
+            '관리건축물대장PK': 'mgmBldrgstPk',
+            '층번호': 'flrNo',
+            '층구분코드명': 'flrGbCdNm',
+            '층구분명': 'flrGbCdNm',
+            '주용도코드명': 'mainPurpsCdNm',
+            '주용도명': 'mainPurpsCdNm'
+        }
+        df_f.rename(columns=col_mapping, inplace=True)
+        
+        # 만약 변환 후에도 'flrNo'가 없다면 화면에 실제 칼럼명을 출력하여 문제 원인 파악
+        if 'flrNo' not in df_f.columns:
+            st.error(f"❌ 층별 데이터에 층번호 칼럼이 없습니다. 현재 파일의 칼럼 목록: {list(df_f.columns)}")
+            return df_m, None
+
         # 층수 정렬을 위해 숫자화 (예: 1, 2, 3...)
         df_f['flrNo_int'] = pd.to_numeric(df_f['flrNo'], errors='coerce').fillna(0).astype(int)
         
@@ -86,47 +104,50 @@ if user_input and df_master is not None:
         # 📌 층별 상세 용도 리스트업
         st.markdown('<div class="floor-info-box"><p style="font-size:18px; font-weight:bold; margin-bottom:15px;">🏢 층별 상세 현황</p>', unsafe_allow_html=True)
         
-        # 층별 데이터에서 해당 건물 PK로 필터링
-        floors = df_floor[df_floor['mgmBldrgstPk'] == pk].sort_values(by='flrNo_int')
-        
-        if not floors.empty:
-            # 층별 용도 압축 로직 (동일 용도 묶기)
-            display_list = []
-            temp_floors = []
-            prev_purp = ""
+        if df_floor is not None:
+            # 층별 데이터에서 해당 건물 PK로 필터링
+            floors = df_floor[df_floor['mgmBldrgstPk'] == pk].sort_values(by='flrNo_int')
             
-            for _, f_row in floors.iterrows():
-                f_name = f"{f_row['flrGbCdNm']} {f_row['flrNo']}층".replace('지상 ', '')
-                f_purp = f_row['mainPurpsCdNm']
+            if not floors.empty:
+                # 층별 용도 압축 로직
+                display_list = []
+                temp_floors = []
+                prev_purp = ""
                 
-                if f_purp == prev_purp:
-                    temp_floors.append(f_row['flrNo'])
-                else:
-                    if prev_purp:
-                        if len(temp_floors) > 1:
-                            display_list.append((f"{temp_floors[0]}~{temp_floors[-1]}층", f"{prev_purp} (동일)"))
-                        else:
-                            display_list.append((f"{temp_floors[0]}층", prev_purp))
-                    temp_floors = [f_row['flrNo']]
-                    prev_purp = f_purp
-            
-            # 마지막 남은 항목 처리
-            if prev_purp:
-                if len(temp_floors) > 1:
-                    display_list.append((f"{temp_floors[0]}~{temp_floors[-1]}층", f"{prev_purp} (동일)"))
-                else:
-                    display_list.append((f"{temp_floors[0]}층", prev_purp))
+                for _, f_row in floors.iterrows():
+                    f_name = f"{f_row.get('flrGbCdNm', '')} {f_row.get('flrNo', '')}층".replace('지상 ', '').strip()
+                    f_purp = f_row.get('mainPurpsCdNm', '정보 없음')
+                    
+                    if f_purp == prev_purp:
+                        temp_floors.append(f_row.get('flrNo', ''))
+                    else:
+                        if prev_purp:
+                            if len(temp_floors) > 1:
+                                display_list.append((f"{temp_floors[0]}~{temp_floors[-1]}층", f"{prev_purp} (동일)"))
+                            else:
+                                display_list.append((f"{temp_floors[0]}층", prev_purp))
+                        temp_floors = [f_row.get('flrNo', '')]
+                        prev_purp = f_purp
+                
+                # 마지막 남은 항목 처리
+                if prev_purp:
+                    if len(temp_floors) > 1:
+                        display_list.append((f"{temp_floors[0]}~{temp_floors[-1]}층", f"{prev_purp} (동일)"))
+                    else:
+                        display_list.append((f"{temp_floors[0]}층", prev_purp))
 
-            # 결과 출력
-            for flr, purp in display_list:
-                st.markdown(f"""
-                    <div class="floor-row">
-                        <span class="floor-label">{flr}</span>
-                        <span class="floor-use">{purp}</span>
-                    </div>
-                """, unsafe_allow_html=True)
+                # 결과 출력
+                for flr, purp in display_list:
+                    st.markdown(f"""
+                        <div class="floor-row">
+                            <span class="floor-label">{flr}</span>
+                            <span class="floor-use">{purp}</span>
+                        </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.write("해당 건물의 층별 상세 데이터가 없습니다.")
         else:
-            st.write("해당 건물의 층별 상세 데이터가 없습니다.")
+            st.error("층별 데이터를 불러오지 못했습니다.")
         
         st.markdown('</div>', unsafe_allow_html=True)
 
