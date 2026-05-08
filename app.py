@@ -307,9 +307,9 @@ def has_elevator(floor_df: pd.DataFrame, pk: str) -> bool:
 
 @st.cache_data(show_spinner="📂 데이터 로딩 중…")
 def load_all():
-    master = robust_load("mini_master_csv.gz")
-    floor  = robust_load("mini_floor_csv.gz")
-    unit   = robust_load("mini_unit_csv.gz")
+    master = robust_load("mini_master.csv.gz")
+floor  = robust_load("mini_floor.csv.gz")
+unit   = robust_load("mini_unit.csv.gz")
 
     # 검색용 정규화 주소
     master['addr_norm'] = master['대지위치'].apply(normalize_addr)
