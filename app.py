@@ -3,199 +3,110 @@ import pandas as pd
 import re
 import os
 
-# ════════════════════════════════════════════════════════════
-# 페이지 설정 및 디자인 (준석 님 취향 반영: 폰트 굵기 500-600)
-# ════════════════════════════════════════════════════════════
-st.set_page_config(
-    page_title="원탑 건축물대장 추출기",
-    page_icon="🏢",
-    layout="centered",
-)
+# 📌 1. 페이지 설정 및 디자인
+st.set_page_config(page_title="원탑 건축물대장 추출기", page_icon="🏢", layout="centered")
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@500;600;800&display=swap');
+    .stApp { background-color: #f4f6f9; }
+    html, body, [class*="css"] { color: #111111 !important; font-weight: 500 !important; }
+    .main-title { font-size: 26px; font-weight: 800; color: #000000; margin-bottom: 10px; }
+    
+    /* 검색창 디자인 (시인성 강조) */
+    div[data-testid="stTextInput"] input {
+        font-size: 18px !important; font-weight: 600 !important; padding: 14px 15px !important; 
+        background-color: #ffffff !important; color: #000000 !important;
+        border: 2px solid #007bff !important; border-radius: 12px;
+    }
 
-html, body, [class*="css"] {
-    font-family: 'Noto Sans KR', sans-serif !important;
-    font-weight: 500 !important; /* 중간 굵기 고정 */
-    color: #111111 !important;
-}
-
-/* 검색창: 배경 흰색, 글자 검정 고정 (시인성 확보) */
-div[data-testid="stTextInput"] input {
-    background-color: #ffffff !important;
-    color: #111111 !important;
-    font-weight: 600 !important;
-    border: 2px solid #007bff !important;
-    border-radius: 10px;
-    padding: 12px !important;
-}
-
-/* 위반건축물 경고 */
-.violation-box {
-    background-color: #ff4b4b;
-    color: white;
-    padding: 15px;
-    border-radius: 10px;
-    text-align: center;
-    font-weight: 800;
-    margin-bottom: 20px;
-    animation: blink 1.5s infinite;
-}
-@keyframes blink { 0% {opacity: 1;} 50% {opacity: 0.7;} 100% {opacity: 1;} }
-
-/* 결과 컨테이너 */
-.info-card {
-    background-color: #ffffff;
-    padding: 20px;
-    border-radius: 15px;
-    border-left: 8px solid #6f42c1;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-    margin-top: 20px;
-}
-
-.data-row {
-    display: flex;
-    justify-content: space-between;
-    padding: 10px 0;
-    border-bottom: 1px solid #f0f2f6;
-}
-
-.label { font-weight: 700; color: #6f42c1; }
-.value { font-weight: 800; color: #007bff; }
-.gagu-badge {
-    background-color: #ffc107;
-    color: #212529;
-    padding: 2px 8px;
-    border-radius: 5px;
-    font-size: 13px;
-    font-weight: 800;
-}
+    .info-card { background-color: #ffffff; padding: 18px; border-radius: 15px; border-left: 6px solid #6f42c1; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-top: 15px; }
+    .data-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #f1f3f5; }
+    .label-col { font-weight: 800; color: #6f42c1; min-width: 65px; }
+    .value-col { color: #007bff; font-weight: 800; min-width: 85px; text-align: right; }
+    .gagu-badge { background-color: #ffc107; color: #212529; font-size: 12px; font-weight: 800; padding: 2px 6px; border-radius: 6px; margin-left: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
-# ════════════════════════════════════════════════════════════
-# 유연한 데이터 로딩 함수 (KeyError 방지용)
-# ════════════════════════════════════════════════════════════
+# 📌 2. 지번 숫자 정규화 함수 (핵심!)
+def normalize_jibun(text):
+    if not text: return ""
+    # 숫자와 하이픈(-)만 남김
+    nums = re.sub(r'[^0-9-]', '', str(text))
+    # '1202-0002' -> ['1202', '0002'] -> ['1202', '2'] -> '1202-2' 로 변환
+    parts = [str(int(p)) for p in nums.split('-') if p.isdigit()]
+    return "-".join(parts)
+
 @st.cache_data
-def load_data(file_path, data_type):
-    if not os.path.exists(file_path):
-        return None
+def load_data_v8(file_path, d_type):
+    if not os.path.exists(file_path): return None
     try:
         df = pd.read_csv(file_path, dtype=str)
-        # 컬럼명 유령 문자 및 공백 제거
+        # 컬럼명 쓰레기 문자 제거
         df.columns = [re.sub(r'[^a-zA-Z0-9ㄱ-ㅣ가-힣()㎡]', '', c).strip() for c in df.columns]
         
-        # 순서 기반 강제 매핑 (이름이 바뀌어도 에러 방지)
-        if data_type == 'master':
+        if d_type == 'master':
+            # 순서대로 강제 매칭
             new_cols = ['addr', 'pk', 'bld_type', 'floors', 'gagu', 'sadae', 'tot_area', 'app_date', 'p_in', 'p_out']
             df.columns = new_cols + list(df.columns[len(new_cols):])
-            # 검색용 정규화 주소 생성
-            df['addr_norm'] = df['addr'].str.replace(r'[\s-]', '', regex=True)
-        elif data_type == 'floor':
-            new_cols = ['pk', 'flr_no', 'purpose', 'etc', 'area']
-            df.columns = new_cols + list(df.columns[len(new_cols):])
-        elif data_type == 'unit':
-            new_cols = ['pk', 'dong', 'ho', 'flr_no', 'area']
-            df.columns = new_cols + list(df.columns[len(new_cols):])
+            # 데이터 내의 지번을 '1202-2' 형태로 미리 정규화해서 저장
+            df['jibun_key'] = df['addr'].apply(normalize_jibun)
+        elif d_type == 'floor':
+            df.columns = ['pk', 'flr_no', 'purpose', 'etc', 'area'] + list(df.columns[5:])
+        elif d_type == 'unit':
+            df.columns = ['pk', 'dong', 'ho', 'flr_no', 'area'] + list(df.columns[5:])
         return df
-    except:
-        return None
+    except: return None
 
-# ════════════════════════════════════════════════════════════
-# 메인 실행 로직
-# ════════════════════════════════════════════════════════════
-def main():
-    st.markdown('<p class="main-title">🏢 원탑 건축물대장 추출기</p>', unsafe_allow_html=True)
-    
-    # 데이터 로드
-    master = load_data("mini_master.csv.gz", "master")
-    floor = load_data("mini_floor.csv.gz", "floor")
-    unit = load_data("mini_unit.csv.gz", "unit")
+# 📌 3. 실행부
+st.markdown('<p class="main-title">🏢 원탑 건축물대장 추출기 v8.0</p>', unsafe_allow_html=True)
 
-    if master is None:
-        st.error("❌ 'mini_master.csv.gz' 파일을 찾을 수 없습니다.")
-        return
+master = load_data_v8("mini_master.csv.gz", "master")
+floor = load_data_v8("mini_floor.csv.gz", "floor")
+unit = load_data_v8("mini_unit.csv.gz", "unit")
 
-    # 주소 검색창
-    query = st.text_input("📍 지번 주소 입력", placeholder="예) 매탄동 1202-2")
+query = st.text_input("📍 지번 주소 입력 (동 제외 숫자만 쳐보세요)", placeholder="예) 매탄동 1202-2 또는 1202-2")
 
-    if query:
-        q_norm = re.sub(r'[\s-]', '', query)
-        matched = master[master['addr_norm'].str.contains(q_norm, na=False)]
+if query:
+    if master is not None:
+        # 1. 입력한 주소에서 숫자-숫자 부분만 추출
+        q_jibun = normalize_jibun(query)
+        
+        # 2. 동 이름 추출 (입력값에 문자가 섞여있을 경우)
+        q_dong = re.sub(r'[0-9-\s]', '', query)
 
-        if matched.empty:
-            st.warning("일치하는 건물이 없습니다. 지번을 확인해주세요.")
-        else:
-            # 여러 건일 경우 선택 (보통은 1건)
-            if len(matched) > 1:
-                selected_addr = st.selectbox("여러 건이 검색되었습니다. 선택하세요:", matched['addr'].tolist())
-                item = matched[matched['addr'] == selected_addr].iloc[0]
-            else:
-                item = matched.iloc[0]
+        # 3. 검색 필터링
+        # 지번 숫자(`1202-2`)가 일치하고, 동 이름이 포함된 행 찾기
+        mask = (master['jibun_key'] == q_jibun)
+        if q_dong:
+            mask &= master['addr'].str.contains(q_dong, na=False)
+            
+        res = master[mask]
 
+        if not res.empty:
+            item = res.iloc[0]
             pk = item['pk']
-            b_type = str(item['bld_type'])
-
-            # 상단 메트릭 요약 (주차, 가구수 등)
-            st.info(f"📍 **조회 주소:** {item['addr']} ({b_type})")
+            st.info(f"📍 **조회 주소:** {item['addr']} ({item['bld_type']})")
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("🏗️ 층수", f"{item['floors']}층")
-            with col2:
-                total_h = int(float(item['gagu'] or 0)) + int(float(item['sadae'] or 0))
-                st.metric("🏠 가구수", f"{total_h}가구")
-            with col3:
-                total_p = int(float(item['p_in'] or 0)) + int(float(item['p_out'] or 0))
-                st.metric("🚗 주차", f"{total_p}대")
+            c1, c2, c3 = st.columns(3)
+            with c1: st.metric("🏗️ 층수", f"{item['floors']}층")
+            with c2: st.metric("🏠 가구", f"{int(float(item['gagu'] or 0)) + int(float(item['sadae'] or 0))}가구")
+            with c3: st.metric("🚗 주차", f"{int(float(item['p_in'] or 0)) + int(float(item['p_out'] or 0))}대")
 
-            # 상세 정보 출력 분기
             st.markdown('<div class="info-card">', unsafe_allow_html=True)
-            
-            if "집합" in b_type:
-                st.markdown("### 🔑 호수별 전용면적 (다세대/아파트)")
+            if "집합" in str(item['bld_type']):
+                st.markdown("### 🔑 호수별 전용면적")
                 if unit is not None:
-                    target_units = unit[unit['pk'] == pk]
-                    if not target_units.empty:
-                        for _, u in target_units.iterrows():
-                            st.markdown(f"""
-                            <div class="data-row">
-                                <span class="label">{u['flr_no']}층 {u['ho']}</span>
-                                <span class="value">{u['area']} ㎡</span>
-                            </div>
-                            """, unsafe_allow_html=True)
-                else:
-                    st.write("상세 면적 데이터가 없습니다.")
-            
+                    u_list = unit[unit['pk'] == pk]
+                    for _, u in u_list.iterrows():
+                        st.markdown(f'<div class="data-row"><span>{u["flr_no"]}층 {u["ho"]}</span><span class="value">{u["area"]} ㎡</span></div>', unsafe_allow_html=True)
             else:
-                st.markdown("### 🏢 층별 상세 현황 (다가구/단독)")
+                st.markdown("### 🏢 층별 상세 현황")
                 if floor is not None:
-                    target_floors = floor[floor['pk'] == pk]
-                    if not target_floors.empty:
-                        for _, f in target_floors.iterrows():
-                            # 수기 가구수 Regex 추출
-                            etc_text = str(f['etc'])
-                            g_match = re.search(r'(\d+)\s*(가구|호)', etc_text)
-                            badge = f'<span class="gagu-badge">{g_match.group(0)}</span>' if g_match else ""
-                            
-                            st.markdown(f"""
-                            <div class="data-row">
-                                <span class="label">{f['flr_no']}층 {f['purpose']}</span>
-                                {badge}
-                                <span class="value">{f['area']} ㎡</span>
-                            </div>
-                            """, unsafe_allow_html=True)
-                else:
-                    st.write("층별 데이터가 없습니다.")
-            
+                    f_list = floor[floor['pk'] == pk]
+                    for _, f in f_list.iterrows():
+                        g_match = re.search(r'(\d+)\s*(가구|호)', str(f['etc']))
+                        badge = f'<span class="gagu-badge">{g_match.group(0)}</span>' if g_match else ""
+                        st.markdown(f'<div class="data-row"><span>{f["flr_no"]}층 {f["purpose"]}</span>{badge}<span class="value">{f["area"]} ㎡</span></div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
-
-            # 광고 등록 팁 (준석 님 전용 메모)
-            with st.expander("💡 광고 등록 팁"):
-                st.write("- **도보권 기준:** 네이버 지도 검색 시 10분 이내여야 '도보권' 문구 사용 가능.")
-                st.write("- **면적:** 위 수치는 복도/계단 포함 연면적일 수 있으니 실측 평수 확인 권장.")
-
-if __name__ == "__main__":
-    main()
+        else:
+            st.error(f"'{query}' (지번: {q_jibun}) 정보를 찾을 수 없습니다.")
