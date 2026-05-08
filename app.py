@@ -5,44 +5,36 @@ import os
 # 📌 1. 페이지 설정
 st.set_page_config(page_title="원탑 건축물대장 조회", page_icon="🏢", layout="centered")
 
-# 📌 2. 디자인 CSS (폰트 중간 굵기, 모바일 검색창 최적화)
+# 📌 2. 디자인 CSS 
 st.markdown("""
     <style>
-    /* 전체 배경 및 폰트 색상/굵기를 보기 편한 중간 단계로 세팅 */
     .stApp { background-color: #f4f6f9; }
-    html, body, [class*="css"]  {
-        color: #222222 !important; 
-        font-weight: 400 !important; /* 너무 두껍지 않은 기본 굵기 */
-    }
-
-    /* 제목 스타일 */
+    html, body, [class*="css"]  { color: #222222 !important; font-weight: 400 !important; }
     .main-title { font-size: 26px; font-weight: 800; color: #111111; margin-bottom: 5px; letter-spacing: -0.5px; }
     
-    /* 🚨 [핵심 수정] 검색창 (배경 흰색 고정 + 적당한 굵기) */
     div[data-testid="stTextInput"] input {
-        font-size: 20px !important; 
-        font-weight: 600 !important; /* 너무 굵지 않게 600으로 조절 */
-        padding: 16px 15px !important; 
-        color: #111111 !important; /* 타이핑 글자 색상 */
-        background-color: #ffffff !important; /* 다크모드에서도 배경을 무조건 흰색으로 고정 */
-        border: 2px solid #007bff !important; 
-        border-radius: 12px;
+        font-size: 20px !important; font-weight: 600 !important; padding: 16px 15px !important; 
+        color: #111111 !important; background-color: #ffffff !important; 
+        border: 2px solid #007bff !important; border-radius: 12px;
         box-shadow: 0 4px 6px rgba(0,123,255,0.1); 
     }
 
-    /* 위반건축물 경고창 */
-    .violation-box { background-color: #ff4b4b; color: white; padding: 12px; border-radius: 10px; text-align: center; font-weight: 700; margin-bottom: 10px; font-size: 16px;}
+    /* 🚨 위반건축물 경고창 (애니메이션 깜빡임 추가) */
+    .violation-box { 
+        background-color: #dc3545; color: white; padding: 12px; border-radius: 10px; 
+        text-align: center; font-weight: 800; margin-bottom: 15px; font-size: 18px;
+        animation: blink 1.5s infinite;
+    }
+    @keyframes blink { 0% {opacity: 1;} 50% {opacity: 0.8;} 100% {opacity: 1;} }
     
-    /* 4대 핵심 정보 카드 디자인 */
     div[data-testid="stMetric"] { background-color: white; border: 1px solid #e0e6ed; padding: 15px 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
     label[data-testid="stMetricLabel"] { font-size: 15px !important; font-weight: 600 !important; color: #555555 !important; }
     div[data-testid="stMetricValue"] { font-size: 24px !important; font-weight: 700 !important; color: #007bff !important; }
     
-    /* 층별 상세 현황 리스트 디자인 */
     .floor-info-box { background-color: #ffffff; padding: 20px; border-radius: 15px; border-left: 6px solid #6f42c1; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-top: 15px; }
     .floor-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #e9ecef; font-size: 15px; }
     .floor-label { font-weight: 700; color: #6f42c1; min-width: 85px; }
-    .floor-use { color: #222222; text-align: right; font-weight: 500; } /* 용도 글씨 적당한 두께 */
+    .floor-use { color: #222222; text-align: right; font-weight: 500; } 
     </style>
     """, unsafe_allow_html=True)
 
@@ -70,7 +62,7 @@ def load_all_data():
         df_f.rename(columns=col_mapping, inplace=True)
         
         if 'flrNo' not in df_f.columns:
-            st.error(f"❌ 층별 데이터에 층번호 칼럼이 없습니다. 현재 파일의 칼럼 목록: {list(df_f.columns)}")
+            st.error(f"❌ 층별 데이터에 층번호 칼럼이 없습니다.")
             return df_m, None
 
         df_f['flrNo_int'] = pd.to_numeric(df_f['flrNo'], errors='coerce').fillna(0).astype(int)
@@ -96,8 +88,19 @@ if user_input and df_master is not None:
         item = res.iloc[0]
         pk = item['mgmBldrgstPk'] 
         
-        if item.get('vlBldYn') in ['1', 'Y', '위반']:
-            st.markdown('<div class="violation-box">⚠️ 위반건축물 확인 필요</div>', unsafe_allow_html=True)
+        # 🚨 [핵심 수정] 위반건축물 완벽 감지 로직 (한글/영문 칼럼 모두 확인)
+        is_violation = False
+        # '위반건축물여부' 또는 'vlBldYn' 둘 중 하나라도 값이 있으면 가져옴
+        v_val = item.get('vlBldYn', item.get('위반건축물여부', '0'))
+        
+        if pd.notna(v_val):
+            # 대소문자 무시, 공백 제거 후 확인
+            v_str = str(v_val).strip().upper()
+            if v_str in ['1', 'Y', '위반', '위반건축물', 'O', '유']:
+                is_violation = True
+                
+        if is_violation:
+            st.markdown('<div class="violation-box">⚠️ 위반건축물 확인 필요 ⚠️</div>', unsafe_allow_html=True)
 
         st.info(f"📍 **조회 주소:** {item['platPlc']}")
 
