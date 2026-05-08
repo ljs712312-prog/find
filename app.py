@@ -1,28 +1,21 @@
 import streamlit as st
 import pandas as pd
 import os
+import re
 
 # 📌 1. 페이지 설정
-st.set_page_config(
-    page_title="원탑부동산 빌딩마스터 v3.4",
-    page_icon="🏢",
-    layout="centered"
-)
+st.set_page_config(page_title="원탑부동산 빌딩마스터 v3.5", page_icon="🏢", layout="centered")
 
-# 📌 2. 디자인 개선 CSS
+# 📌 2. 디자인 CSS
 st.markdown("""
     <style>
     .stApp { background-color: #f8faff; }
     .main-title { font-size: 28px; font-weight: 900; color: #1e1e1e; margin-bottom: 5px; }
-    
     .violation-box { background-color: #ff4b4b; color: white; padding: 12px; border-radius: 10px; text-align: center; font-weight: bold; margin-bottom: 10px; animation: blink 2s infinite; }
     @keyframes blink { 0% {opacity: 1;} 50% {opacity: 0.8;} 100% {opacity: 1;} }
-
     div[data-testid="stMetric"] { background-color: white; border: 1px solid #e0e6ed; padding: 15px 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.03); }
     label[data-testid="stMetricLabel"] { font-size: 16px !important; font-weight: 600 !important; color: #555 !important; }
     div[data-testid="stMetricValue"] { font-size: 24px !important; font-weight: 800 !important; color: #007bff !important; }
-
-    /* 층별 상세 용도 섹션 디자인 */
     .floor-info-box { background-color: #ffffff; padding: 20px; border-radius: 15px; border-left: 6px solid #6f42c1; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-top: 15px; }
     .floor-list { font-size: 16px; color: #333; line-height: 1.8; margin-top: 10px; }
     </style>
@@ -41,11 +34,59 @@ def load_data():
 
 df = load_data()
 
+# 📌 [핵심 로직] 중복되는 층별 용도 압축 함수 (예: 2층 오피스텔, 3층 오피스텔 -> 2~3층 오피스텔)
+def compress_floor_info(raw_text):
+    if pd.isna(raw_text) or str(raw_text).strip() == '': return ""
+    
+    text = str(raw_text).replace('  ', ' ')
+    
+    # "1층 소매점, 2층 사무소" 처럼 쉼표로 명확히 구분된 텍스트만 압축 시도
+    if '층' in text and ',' in text:
+        items = [x.strip() for x in text.split(',')]
+        compressed = []
+        prev_purp = ""
+        start_floor = ""
+        last_floor = ""
+
+        for item in items:
+            # 정규식으로 층수와 용도 분리 시도 (예: "2층 다가구주택" -> "2층", "다가구주택")
+            match = re.match(r'(지?\d+층)\s*(.*)', item)
+            if match:
+                floor, purp = match.groups()
+                purp = purp.strip()
+                
+                if purp == prev_purp:
+                    last_floor = floor.replace('층', '') # 같은 용도면 끝 층수만 업데이트
+                else:
+                    if prev_purp:
+                        # 이전 묶음 저장
+                        if start_floor == last_floor or not last_floor:
+                            compressed.append(f"🔹 {start_floor} {prev_purp}")
+                        else:
+                            compressed.append(f"🔹 {start_floor}~{last_floor}층 동일 ({prev_purp})")
+                    start_floor = floor
+                    last_floor = floor.replace('층', '')
+                    prev_purp = purp
+            else:
+                # 패턴이 안 맞으면 그대로 출력
+                compressed.append(f"🔹 {item}")
+        
+        # 마지막 항목 처리
+        if prev_purp:
+            if start_floor == last_floor or not last_floor:
+                compressed.append(f"🔹 {start_floor} {prev_purp}")
+            else:
+                compressed.append(f"🔹 {start_floor}~{last_floor}층 동일 ({prev_purp})")
+                
+        return "<br>".join(compressed)
+    else:
+        # "단독주택외2" 같이 짧게 요약된 원본 데이터는 그대로 표출
+        return "🔹 " + text.replace(',', '<br>🔹 ')
+
 # 📌 4. 메인 UI
 st.markdown('<p class="main-title">🏢 원탑부동산 빌딩마스터</p>', unsafe_allow_html=True)
 st.caption("수원 건축물대장 데이터 통합 조회 시스템")
 
-# 검색창을 다시 하나로 통일하고 크기를 키움
 user_input = st.text_input("🔍 주소 입력", placeholder="예: 인계동 1030-11")
 
 if user_input and df is not None:
@@ -55,13 +96,11 @@ if user_input and df is not None:
     if not res.empty:
         item = res.iloc[0]
         
-        # ⚠️ 위반건축물 체크
         if item.get('vlBldYn') in ['1', 'Y', '위반']:
             st.markdown('<div class="violation-box">⚠️ 위반건축물 확인 필요</div>', unsafe_allow_html=True)
 
         st.info(f"📍 **조회 주소:** {item['platPlc']}")
 
-        # 📌 4대 핵심 정보
         col1, col2 = st.columns(2)
         with col1:
             st.metric("🏗️ 전체 층수", f"지상 {item.get('grndFlrCnt', '0')}층")
@@ -82,7 +121,6 @@ if user_input and df is not None:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 📌 대표 용도 및 다방 팁
         purp = item.get('mainPurpsCdNm', '정보 없음')
         if '다세대' in purp or '연립' in purp:
             st.success(f"📋 **건물 주용도:** {purp} 👉 다방 추천: [빌라/연립/다세대]")
@@ -93,24 +131,21 @@ if user_input and df is not None:
         else:
             st.success(f"📋 **건물 주용도:** {purp} 👉 다방 추천: [기타]")
 
-        # 📌 [수정됨] 층별 상세 용도 자동 표출
+        # 📌 층별 상세 용도 자동 압축 표출
         etc_purp = item.get('etcPurps', '')
         
         if pd.isna(etc_purp) or str(etc_purp).lower() == 'nan' or str(etc_purp).strip() == '':
-            formatted_purp = "건축물대장(표제부)에 층별 상세 용도가 기재되어 있지 않습니다."
+            formatted_purp = "🔹 건축물대장(표제부)에 층별 상세 용도가 기재되어 있지 않습니다."
         else:
-            # 모바일 가독성을 위해 쉼표(,)를 기준으로 줄바꿈 처리
-            raw_text = str(etc_purp)
-            formatted_purp = raw_text.replace(',', '<br>🔹 ').replace('  ', ' ')
-            if not formatted_purp.startswith('🔹'):
-                formatted_purp = '🔹 ' + formatted_purp
+            formatted_purp = compress_floor_info(etc_purp)
 
         st.markdown(f"""
             <div class="floor-info-box">
-                <p style="font-size:18px; font-weight:bold; color:#1e1e1e; margin-bottom:5px;">🏢 전체 층별 상세 용도</p>
+                <p style="font-size:18px; font-weight:bold; color:#1e1e1e; margin-bottom:5px;">🏢 층별 상세 용도</p>
                 <div class="floor-list">
                     {formatted_purp}
                 </div>
+                <p style="font-size:12px; color:#888; margin-top:10px;">※ 원본 데이터 사정에 따라 요약 표기(예: 단독주택외2)로 나올 수 있습니다.</p>
             </div>
         """, unsafe_allow_html=True)
 
@@ -118,7 +153,7 @@ if user_input and df is not None:
             st.caption(f"🏢 건물명: {item['bldNm']}")
 
     else:
-        st.error("데이터를 찾을 수 없습니다. 주소를 다시 확인해 주세요.")
+        st.error("데이터를 찾을 수 없습니다.")
 
 st.markdown("---")
-st.caption("© 원탑부동산 빌딩마스터 v3.4")
+st.caption("© 원탑부동산 빌딩마스터 v3.5")
