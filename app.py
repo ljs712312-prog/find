@@ -5,21 +5,47 @@ import os
 # 📌 1. 페이지 설정
 st.set_page_config(page_title="원탑 건축물대장 조회", page_icon="🏢", layout="centered")
 
-# 📌 2. 디자인 CSS
+# 📌 2. 디자인 CSS (폰트 진하게, 검색창 크게 개선)
 st.markdown("""
     <style>
-    .stApp { background-color: #f8faff; }
-    .main-title { font-size: 28px; font-weight: 900; color: #1e1e1e; margin-bottom: 5px; }
-    .violation-box { background-color: #ff4b4b; color: white; padding: 12px; border-radius: 10px; text-align: center; font-weight: bold; margin-bottom: 10px; }
-    div[data-testid="stMetric"] { background-color: white; border: 1px solid #e0e6ed; padding: 15px 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.03); }
+    /* 전체 배경 및 기본 폰트 색상/굵기 진하게 설정 */
+    .stApp { background-color: #f4f6f9; }
+    html, body, [class*="css"]  {
+        color: #111111 !important; /* 텍스트를 아주 진한 검정색으로 */
+        font-weight: 500 !important; /* 기본 굵기를 한 단계 올려서 또렷하게 */
+    }
+
+    /* 제목 스타일 */
+    .main-title { font-size: 28px; font-weight: 900; color: #000000; margin-bottom: 5px; letter-spacing: -0.5px; }
+    
+    /* 🚨 [핵심] 검색창 크기 및 폰트 대폭 확대 */
+    div[data-testid="stTextInput"] input {
+        font-size: 22px !important; /* 검색어 글자 크기 대폭 키움 */
+        font-weight: 800 !important; /* 검색어 아주 굵게 */
+        padding: 18px 15px !important; /* 위아래 여백을 늘려 입력창 자체를 뚱뚱하게 만듦 */
+        color: #000000 !important;
+        border: 2px solid #007bff !important; /* 파란색 테두리로 눈에 띄게 */
+        border-radius: 12px;
+        box-shadow: 0 4px 6px rgba(0,123,255,0.1); /* 약간의 그림자 효과 */
+    }
+
+    /* 위반건축물 경고창 */
+    .violation-box { background-color: #ff4b4b; color: white; padding: 12px; border-radius: 10px; text-align: center; font-weight: bold; margin-bottom: 10px; font-size: 18px;}
+    
+    /* 4대 핵심 정보 카드 디자인 */
+    div[data-testid="stMetric"] { background-color: white; border: 1px solid #e0e6ed; padding: 15px 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+    label[data-testid="stMetricLabel"] { font-size: 16px !important; font-weight: 700 !important; color: #333333 !important; }
+    div[data-testid="stMetricValue"] { font-size: 26px !important; font-weight: 900 !important; color: #007bff !important; }
+    
+    /* 층별 상세 현황 리스트 디자인 */
     .floor-info-box { background-color: #ffffff; padding: 20px; border-radius: 15px; border-left: 6px solid #6f42c1; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-top: 15px; }
-    .floor-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; font-size: 15px; }
-    .floor-label { font-weight: bold; color: #6f42c1; min-width: 80px; }
-    .floor-use { color: #333; text-align: right; }
+    .floor-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #e9ecef; font-size: 16px; }
+    .floor-label { font-weight: 800; color: #6f42c1; min-width: 85px; }
+    .floor-use { color: #000000; text-align: right; font-weight: 600; } /* 용도 글씨도 아주 진하게 */
     </style>
     """, unsafe_allow_html=True)
 
-# 📌 3. 데이터 로딩 (한글/영문 칼럼명 자동 호환 로직 추가)
+# 📌 3. 데이터 로딩
 @st.cache_data
 def load_all_data():
     master_file = "suwon_building_master_v3.csv.gz"
@@ -37,24 +63,19 @@ def load_all_data():
         # 층별 데이터 (상세 용도)
         df_f = pd.read_csv(floor_file, dtype=str)
         
-        # 🚨 [핵심 수정] 다운로드 받은 파일이 한글 칼럼일 경우 파이썬이 인식하도록 자동 변환
+        # 한글/영문 칼럼명 자동 호환 로직
         col_mapping = {
-            '관리건축물대장pk': 'mgmBldrgstPk',
-            '관리건축물대장PK': 'mgmBldrgstPk',
-            '층번호': 'flrNo',
-            '층구분코드명': 'flrGbCdNm',
-            '층구분명': 'flrGbCdNm',
-            '주용도코드명': 'mainPurpsCdNm',
-            '주용도명': 'mainPurpsCdNm'
+            '관리건축물대장pk': 'mgmBldrgstPk', '관리건축물대장PK': 'mgmBldrgstPk',
+            '층번호': 'flrNo', '층구분코드명': 'flrGbCdNm', '층구분명': 'flrGbCdNm',
+            '주용도코드명': 'mainPurpsCdNm', '주용도명': 'mainPurpsCdNm'
         }
         df_f.rename(columns=col_mapping, inplace=True)
         
-        # 만약 변환 후에도 'flrNo'가 없다면 화면에 실제 칼럼명을 출력하여 문제 원인 파악
         if 'flrNo' not in df_f.columns:
             st.error(f"❌ 층별 데이터에 층번호 칼럼이 없습니다. 현재 파일의 칼럼 목록: {list(df_f.columns)}")
             return df_m, None
 
-        # 층수 정렬을 위해 숫자화 (예: 1, 2, 3...)
+        # 층수 정렬을 위해 숫자화
         df_f['flrNo_int'] = pd.to_numeric(df_f['flrNo'], errors='coerce').fillna(0).astype(int)
         
         return df_m, df_f
@@ -76,7 +97,7 @@ if user_input and df_master is not None:
 
     if not res.empty:
         item = res.iloc[0]
-        pk = item['mgmBldrgstPk'] # 두 파일을 연결할 고유 번호
+        pk = item['mgmBldrgstPk'] 
         
         # ⚠️ 위반건축물 체크
         if item.get('vlBldYn') in ['1', 'Y', '위반']:
@@ -102,14 +123,12 @@ if user_input and df_master is not None:
             st.metric("🏠 총 세대(가구)수", f"{hhld + fmly}세대")
 
         # 📌 층별 상세 용도 리스트업
-        st.markdown('<div class="floor-info-box"><p style="font-size:18px; font-weight:bold; margin-bottom:15px;">🏢 층별 상세 현황</p>', unsafe_allow_html=True)
+        st.markdown('<div class="floor-info-box"><p style="font-size:18px; font-weight:900; margin-bottom:15px; color:#000000;">🏢 층별 상세 현황</p>', unsafe_allow_html=True)
         
         if df_floor is not None:
-            # 층별 데이터에서 해당 건물 PK로 필터링
             floors = df_floor[df_floor['mgmBldrgstPk'] == pk].sort_values(by='flrNo_int')
             
             if not floors.empty:
-                # 층별 용도 압축 로직
                 display_list = []
                 temp_floors = []
                 prev_purp = ""
@@ -129,14 +148,12 @@ if user_input and df_master is not None:
                         temp_floors = [f_row.get('flrNo', '')]
                         prev_purp = f_purp
                 
-                # 마지막 남은 항목 처리
                 if prev_purp:
                     if len(temp_floors) > 1:
                         display_list.append((f"{temp_floors[0]}~{temp_floors[-1]}층", f"{prev_purp} (동일)"))
                     else:
                         display_list.append((f"{temp_floors[0]}층", prev_purp))
 
-                # 결과 출력
                 for flr, purp in display_list:
                     st.markdown(f"""
                         <div class="floor-row">
