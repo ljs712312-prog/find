@@ -4,7 +4,7 @@ import re
 import os
 import gc
 
-# 1. 페이지 설정 및 디자인
+# 1. 페이지 설정 및 초기 이쁜 디자인 복구
 st.set_page_config(page_title="원탑 건축물대장 추출기", layout="centered")
 
 st.markdown("""
@@ -39,51 +39,47 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 2. 로직 함수
+# --- 유틸리티 함수 ---
 def clean_col(c):
-    return re.sub(r'[^a-zA-Z0-9ㄱ-ㅣ가-힣()㎡]', '', str(c))
+    return re.sub(r'[^a-zA-Z0-9ㄱ-ㅣ가-힣()㎡]', '', str(c)).strip()
 
-def parse_query(q):
-    # '산' 여부 확인 및 본번-부번 추출
+def normalize_jibun(q):
+    # 입력값에서 숫자만 뽑아 '본번-부번' 형태로 통일
     is_san = '2' if '산' in q else '1'
     nums = re.findall(r'\d+', q)
     main = str(int(nums[0])) if len(nums) > 0 else ""
     sub = str(int(nums[1])) if len(nums) > 1 else "0"
     return is_san, f"{main}-{sub}"
 
-def natural_sort_key(s):
-    # 층수나 호수를 숫자 기준으로 정렬 (B1, 1, 2, 10 순서)
-    return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', str(s))]
-
-@st.cache_data(show_spinner="건물 정보를 분석 중입니다...")
-def fetch_building_data(query_str):
+# --- 데이터 검색 로직 (메모리 효율 극대화) ---
+@st.cache_data(show_spinner="건물을 찾는 중...")
+def search_master(query_str):
     f_master = "suwon_building_master.csv.gz"
-    if not os.path.exists(f_master): return None, None, None, None
-
-    is_san_query, q_jibun_full = parse_query(query_str)
+    if not os.path.exists(f_master): return []
+    
+    is_san_q, q_jibun_full = normalize_jibun(query_str)
     q_dong = re.sub(r'[0-9-\s]', '', query_str).replace("산", "").strip()
-
-    # 필수 칼럼 로드
+    
+    results = []
+    # 마스터 파일만 먼저 읽어서 검색 (나머지 파일은 나중에 로드)
     m_cols = ['대지위치', '대지구분코드', '번', '지', '도로명대지위치', '관리건축물대장PK', '대장구분코드명', '주용도코드명', '건물명', '동명칭', '지상층수', '가구수(가구)', '세대수(세대)', '사용승인일', '옥내자주식대수(대)', '옥외자주식대수(대)', '승용승강기수', '비상용승강기수']
     
-    matched_results = []
     for chunk in pd.read_csv(f_master, dtype=str, chunksize=50000):
         chunk.columns = [clean_col(c) for c in chunk.columns]
         # 데이터의 0006-0011 -> 6-11 변환
-        chunk['temp_jibun'] = chunk['번'].fillna('0').apply(lambda x: str(int(x)) if x.isdigit() else "") + "-" + \
+        chunk['search_key'] = chunk['번'].fillna('0').apply(lambda x: str(int(x)) if x.isdigit() else "") + "-" + \
                               chunk['지'].fillna('0').apply(lambda x: str(int(x)) if x.isdigit() else "0")
         
-        mask = (chunk['temp_jibun'] == q_jibun_full) & (chunk['대지구분코드'] == is_san_query)
+        mask = (chunk['search_key'] == q_jibun_full) & (chunk['대지구분코드'] == is_san_q)
         if q_dong: mask &= chunk['대지위치'].str.contains(q_dong, na=False)
         
         res = chunk[mask]
-        if not res.empty: matched_results.extend(res.to_dict('records'))
+        if not res.empty: results.extend(res.to_dict('records'))
+    return results
 
-    if not matched_results: return None, None, None, None
-
-    pks = [r['관리건축물대장PK'] for r in matched_results]
-    
-    # 층별/호수별 데이터 로드
+@st.cache_data(show_spinner="상세 면적 정보를 가져오는 중...")
+def get_details(pks):
+    # 상세 정보는 검색된 PK가 있을 때만 해당 줄만 골라서 읽음
     floor = pd.read_csv("suwon_floor_info.csv.gz", dtype=str)
     floor.columns = [clean_col(c) for c in floor.columns]
     floor = floor[floor['관리건축물대장PK'].isin(pks)]
@@ -95,25 +91,28 @@ def fetch_building_data(query_str):
     area = pd.read_csv("suwon_unit_area.csv.gz", dtype=str)
     area.columns = [clean_col(c) for c in area.columns]
     area = area[(area['관리건축물대장PK'].isin(pks)) & (area.get('전유공용구분코드', '1') == '1')]
-
+    
     gc.collect()
-    return matched_results, floor, status, area
+    return floor, status, area
 
-# --- 앱 메인 ---
+# --- 메인 화면 ---
 st.markdown('<p class="main-title">🏢 원탑 건축물대장 추출기</p>', unsafe_allow_html=True)
 
 with st.form("search_form"):
-    query = st.text_input("📍 주소 입력", placeholder="예: 망포동 6-11 / 망포동 산 12-3")
+    query = st.text_input("📍 지번 또는 동 주소 입력", placeholder="예: 망포동 6-11 / 망포동 산 12-3")
     submitted = st.form_submit_button("🔍 정보 추출하기")
 
 if submitted:
     if not query:
-        st.warning("주소를 입력해주세요.")
+        st.warning("검색어를 입력해주세요.")
     else:
-        results, floor_df, status_df, area_df = fetch_building_data(query)
+        results = search_master(query)
         
         if results:
-            st.success(f"✅ 총 {len(results)}개의 건축물을 찾았습니다.")
+            st.success(f"✅ 해당 지번에서 총 {len(results)}개의 건축물을 찾았습니다.")
+            pks = [r['관리건축물대장PK'] for r in results]
+            f_df, s_df, a_df = get_details(pks)
+            
             for idx, item in enumerate(results):
                 pk = item['관리건축물대장PK']
                 names = [n for n in [str(item.get('건물명', '')).strip(), str(item.get('동명칭', '')).strip()] if n and n != 'nan']
@@ -136,26 +135,26 @@ if submitted:
                 c4.metric("엘베", f"{int(float(item.get('승용승강기수', 0) or 0)) + int(float(item.get('비상용승강기수', 0) or 0))}대")
 
                 st.markdown('<div class="info-card">', unsafe_allow_html=True)
+                # 상세 정보 (집합 vs 일반)
                 if "집합" in str(item.get('대장구분코드명', '')):
                     st.markdown("#### 🔑 호수별 전용면적")
-                    t_stat = status_df[status_df['관리건축물대장PK'] == pk]
-                    t_area = area_df[area_df['관리건축물대장PK'] == pk]
+                    t_stat = s_df[s_df['관리건축물대장PK'] == pk]
+                    t_area = a_df[a_df['관리건축물대장PK'] == pk]
                     if not t_stat.empty and not t_area.empty:
                         merged = pd.merge(t_stat, t_area, on=['관리건축물대장PK', '층번호', '호명칭'], how='inner')
-                        # 자연스러운 정렬 적용
-                        merged['sort_key'] = merged['호명칭'].apply(natural_sort_key)
-                        merged = merged.sort_values('sort_key').drop_duplicates(['층번호', '호명칭'])
-                        for _, u in merged.iterrows():
+                        for _, u in merged.drop_duplicates(['층번호', '호명칭']).sort_values(['층번호', '호명칭']).iterrows():
                             st.markdown(f'<div class="data-row"><span class="label">{u.get("층번호")}층 {u.get("호명칭")}</span><span class="value">{u.get("면적(㎡)")} ㎡</span></div>', unsafe_allow_html=True)
+                    else: st.write("상세 면적 데이터가 없습니다.")
                 else:
                     st.markdown("#### 🏢 층별 상세 현황")
-                    f_list = floor_df[floor_df['관리건축물대장PK'] == pk].copy()
-                    f_list['sort_key'] = f_list['층번호'].apply(natural_sort_key)
-                    for _, f in f_list.sort_values('sort_key').iterrows():
-                        etc = str(f.get('기타용도', ''))
-                        g = re.search(r'(\d+)\s*(가구|호)', etc)
-                        badge = f'<span class="badge">{g.group(0)}</span>' if g else ""
-                        st.markdown(f'<div class="data-row"><span class="label">{f.get("층번호")}층 {f.get("주용도코드명")}{badge}</span><span class="value">{f.get("면적(㎡)")} ㎡</span></div>', unsafe_allow_html=True)
+                    t_floor = f_df[f_df['관리건축물대장PK'] == pk]
+                    if not t_floor.empty:
+                        for _, f in t_floor.sort_values('층번호').iterrows():
+                            etc = str(f.get('기타용도', ''))
+                            g = re.search(r'(\d+)\s*(가구|호)', etc)
+                            badge = f'<span class="badge">{g.group(0)}</span>' if g else ""
+                            st.markdown(f'<div class="data-row"><span class="label">{f.get("층번호")}층 {f.get("주용도코드명")}{badge}</span><span class="value">{f.get("면적(㎡)")} ㎡</span></div>', unsafe_allow_html=True)
+                    else: st.write("층별 데이터가 없습니다.")
                 st.markdown('</div>', unsafe_allow_html=True)
         else:
-            st.error("검색 결과가 없습니다. 지번을 정확히 입력했는지 확인해주세요.")
+            st.error("결과를 찾을 수 없습니다. 지번(산 포함)과 동 주소를 정확히 입력했는지 확인해주세요.")
