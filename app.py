@@ -5,7 +5,7 @@ import os
 # 📌 1. 페이지 설정
 st.set_page_config(page_title="원탑 건축물대장 조회", page_icon="🏢", layout="centered")
 
-# 📌 2. 디자인 CSS 
+# 📌 2. 디자인 CSS (가독성 유지)
 st.markdown("""
     <style>
     .stApp { background-color: #f4f6f9; }
@@ -19,7 +19,7 @@ st.markdown("""
         box-shadow: 0 4px 6px rgba(0,123,255,0.1); 
     }
 
-    /* 🚨 위반건축물 경고창 (애니메이션 깜빡임 추가) */
+    /* 위반건축물 경고창 */
     .violation-box { 
         background-color: #dc3545; color: white; padding: 12px; border-radius: 10px; 
         text-align: center; font-weight: 800; margin-bottom: 15px; font-size: 18px;
@@ -27,9 +27,10 @@ st.markdown("""
     }
     @keyframes blink { 0% {opacity: 1;} 50% {opacity: 0.8;} 100% {opacity: 1;} }
     
-    div[data-testid="stMetric"] { background-color: white; border: 1px solid #e0e6ed; padding: 15px 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-    label[data-testid="stMetricLabel"] { font-size: 15px !important; font-weight: 600 !important; color: #555555 !important; }
-    div[data-testid="stMetricValue"] { font-size: 24px !important; font-weight: 700 !important; color: #007bff !important; }
+    /* 핵심 정보 카드 디자인 */
+    div[data-testid="stMetric"] { background-color: white; border: 1px solid #e0e6ed; padding: 15px 10px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); text-align: center; }
+    label[data-testid="stMetricLabel"] { font-size: 14px !important; font-weight: 600 !important; color: #555555 !important; }
+    div[data-testid="stMetricValue"] { font-size: 22px !important; font-weight: 700 !important; color: #007bff !important; }
     
     .floor-info-box { background-color: #ffffff; padding: 20px; border-radius: 15px; border-left: 6px solid #6f42c1; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-top: 15px; }
     .floor-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #e9ecef; font-size: 15px; }
@@ -88,13 +89,11 @@ if user_input and df_master is not None:
         item = res.iloc[0]
         pk = item['mgmBldrgstPk'] 
         
-        # 🚨 [핵심 수정] 위반건축물 완벽 감지 로직 (한글/영문 칼럼 모두 확인)
+        # 위반건축물 체크
         is_violation = False
-        # '위반건축물여부' 또는 'vlBldYn' 둘 중 하나라도 값이 있으면 가져옴
         v_val = item.get('vlBldYn', item.get('위반건축물여부', '0'))
         
         if pd.notna(v_val):
-            # 대소문자 무시, 공백 제거 후 확인
             v_str = str(v_val).strip().upper()
             if v_str in ['1', 'Y', '위반', '위반건축물', 'O', '유']:
                 is_violation = True
@@ -104,22 +103,38 @@ if user_input and df_master is not None:
 
         st.info(f"📍 **조회 주소:** {item['platPlc']}")
 
-        c1, c2 = st.columns(2)
-        with c1: st.metric("🏗️ 전체 층수", f"지상 {item.get('grndFlrCnt', '0')}층")
+        # 🚨 [핵심 수정] 첫 번째 줄: 층수, 주차, 승강기 (3칸 배열)
+        c1, c2, c3 = st.columns(3)
+        with c1: 
+            st.metric("🏗️ 전체 층수", f"지상 {item.get('grndFlrCnt', '0')}층")
+        
         with c2:
             p_sum = sum([int(float(item.get(c, 0))) for c in ['indrAutoUtcnt', 'indrMechUtcnt', 'oudrAutoUtcnt', 'oudrMechUtcnt'] if pd.notna(item.get(c))])
-            st.metric("🚗 총 주차대수", f"{p_sum}대")
-
-        c3, c4 = st.columns(2)
+            st.metric("🚗 주차대수", f"{p_sum}대")
+            
         with c3:
+            # 엘리베이터 대수 합산 (승용 + 비상용)
+            ride_el = int(float(item.get('rideUseElvtCnt', 0))) if pd.notna(item.get('rideUseElvtCnt')) else 0
+            emgen_el = int(float(item.get('emgenUseElvtCnt', 0))) if pd.notna(item.get('emgenUseElvtCnt')) else 0
+            total_el = ride_el + emgen_el
+            
+            el_status = f"있음 ({total_el}대)" if total_el > 0 else "없음"
+            # 승강기가 있으면 글씨를 파란색, 없으면 회색으로 표시 (스트림릿 metric 기본 색상 활용)
+            st.metric("🛗 승강기", el_status)
+
+        # 두 번째 줄: 사용승인일, 세대수 (2칸 배열)
+        c4, c5 = st.columns(2)
+        with c4:
             u_day = str(item.get('useAprDay', '정보 없음'))
             if len(u_day) >= 8: u_day = f"{u_day[:4]}-{u_day[4:6]}-{u_day[6:8]}"
             st.metric("📅 사용승인일", u_day)
-        with c4:
+            
+        with c5:
             hhld = int(float(item.get('hhldCnt', 0))) if pd.notna(item.get('hhldCnt')) else 0
             fmly = int(float(item.get('fmlyCnt', 0))) if pd.notna(item.get('fmlyCnt')) else 0
             st.metric("🏠 총 세대(가구)수", f"{hhld + fmly}세대")
 
+        # 📌 층별 상세 용도
         st.markdown('<div class="floor-info-box"><p style="font-size:18px; font-weight:800; margin-bottom:15px; color:#111111;">🏢 층별 상세 현황</p>', unsafe_allow_html=True)
         
         if df_floor is not None:
