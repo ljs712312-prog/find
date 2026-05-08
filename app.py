@@ -4,7 +4,7 @@ import os
 
 # 📌 1. 페이지 설정
 st.set_page_config(
-    page_title="원탑부동산 빌딩마스터 v3.3",
+    page_title="원탑부동산 빌딩마스터 v3.4",
     page_icon="🏢",
     layout="centered"
 )
@@ -22,9 +22,9 @@ st.markdown("""
     label[data-testid="stMetricLabel"] { font-size: 16px !important; font-weight: 600 !important; color: #555 !important; }
     div[data-testid="stMetricValue"] { font-size: 24px !important; font-weight: 800 !important; color: #007bff !important; }
 
-    /* 층별/상세 용도 섹션 */
+    /* 층별 상세 용도 섹션 디자인 */
     .floor-info-box { background-color: #ffffff; padding: 20px; border-radius: 15px; border-left: 6px solid #6f42c1; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-top: 15px; }
-    .highlight-text { background-color: #ffeeba; font-weight: bold; padding: 2px 5px; border-radius: 4px; color: #d39e00; }
+    .floor-list { font-size: 16px; color: #333; line-height: 1.8; margin-top: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -45,12 +45,8 @@ df = load_data()
 st.markdown('<p class="main-title">🏢 원탑부동산 빌딩마스터</p>', unsafe_allow_html=True)
 st.caption("수원 건축물대장 데이터 통합 조회 시스템")
 
-# 검색창 2개 (주소 + 층/호수)
-col_search1, col_search2 = st.columns([2, 1])
-with col_search1:
-    user_input = st.text_input("🔍 주소 입력", placeholder="예: 인계동 1030-11")
-with col_search2:
-    target_floor = st.text_input("🏢 확인 층 (선택)", placeholder="예: 2층, 1층")
+# 검색창을 다시 하나로 통일하고 크기를 키움
+user_input = st.text_input("🔍 주소 입력", placeholder="예: 인계동 1030-11")
 
 if user_input and df is not None:
     search_term = user_input.replace(" ", "")
@@ -65,7 +61,7 @@ if user_input and df is not None:
 
         st.info(f"📍 **조회 주소:** {item['platPlc']}")
 
-        # 📌 4대 핵심 정보 (2x2 배열)
+        # 📌 4대 핵심 정보
         col1, col2 = st.columns(2)
         with col1:
             st.metric("🏗️ 전체 층수", f"지상 {item.get('grndFlrCnt', '0')}층")
@@ -86,7 +82,7 @@ if user_input and df is not None:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 📌 대표 건축물 용도 & 다방 팁
+        # 📌 대표 용도 및 다방 팁
         purp = item.get('mainPurpsCdNm', '정보 없음')
         if '다세대' in purp or '연립' in purp:
             st.success(f"📋 **건물 주용도:** {purp} 👉 다방 추천: [빌라/연립/다세대]")
@@ -97,23 +93,24 @@ if user_input and df is not None:
         else:
             st.success(f"📋 **건물 주용도:** {purp} 👉 다방 추천: [기타]")
 
-        # 📌 [신규] 층별 상세 용도 섹션 (기타용도 데이터 활용)
+        # 📌 [수정됨] 층별 상세 용도 자동 표출
         etc_purp = item.get('etcPurps', '')
-        if pd.isna(etc_purp) or etc_purp == 'nan' or etc_purp == '':
-            etc_purp_display = "상세 층별 용도 정보가 기재되어 있지 않습니다. (건축물대장 원본 확인 필요)"
+        
+        if pd.isna(etc_purp) or str(etc_purp).lower() == 'nan' or str(etc_purp).strip() == '':
+            formatted_purp = "건축물대장(표제부)에 층별 상세 용도가 기재되어 있지 않습니다."
         else:
-            etc_purp_display = etc_purp
-            # 사용자가 입력한 층이 있으면 노란색으로 하이라이트
-            if target_floor:
-                target_text = target_floor.strip()
-                if target_text in etc_purp_display:
-                    etc_purp_display = etc_purp_display.replace(target_text, f'<span class="highlight-text">{target_text}</span>')
+            # 모바일 가독성을 위해 쉼표(,)를 기준으로 줄바꿈 처리
+            raw_text = str(etc_purp)
+            formatted_purp = raw_text.replace(',', '<br>🔹 ').replace('  ', ' ')
+            if not formatted_purp.startswith('🔹'):
+                formatted_purp = '🔹 ' + formatted_purp
 
         st.markdown(f"""
             <div class="floor-info-box">
-                <p style="font-size:18px; font-weight:bold; color:#1e1e1e; margin-bottom:10px;">🔍 층별 상세 용도 (기타용도 기재사항)</p>
-                <p style="font-size:16px; color:#444; line-height:1.6;">{etc_purp_display}</p>
-                <p style="font-size:12px; color:#888; margin-top:10px; margin-bottom:0;">※ 표제부 데이터 기반이며, 개별 호실(예: 203호)의 확장 여부 등은 전유부 대장 확인이 필요합니다.</p>
+                <p style="font-size:18px; font-weight:bold; color:#1e1e1e; margin-bottom:5px;">🏢 전체 층별 상세 용도</p>
+                <div class="floor-list">
+                    {formatted_purp}
+                </div>
             </div>
         """, unsafe_allow_html=True)
 
@@ -121,7 +118,7 @@ if user_input and df is not None:
             st.caption(f"🏢 건물명: {item['bldNm']}")
 
     else:
-        st.error("데이터를 찾을 수 없습니다. 주소를 확인해 주세요.")
+        st.error("데이터를 찾을 수 없습니다. 주소를 다시 확인해 주세요.")
 
 st.markdown("---")
-st.caption("© 원탑부동산 빌딩마스터 v3.3")
+st.caption("© 원탑부동산 빌딩마스터 v3.4")
