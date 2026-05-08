@@ -4,7 +4,7 @@ import re
 import os
 import gc
 
-# 1. 페이지 설정 및 디자인 (원탑 부동산 전용 스타일)
+# 1. 페이지 설정 및 디자인
 st.set_page_config(page_title="원탑 건축물대장 추출기", layout="centered")
 
 st.markdown("""
@@ -43,8 +43,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 2. 핵심 검색 로직
-def clean_val(c):
+# 2. 검색 엔진 (사용자가 만족했던 4단계 정규화 로직 유지)
+def clean_col_name(c):
     return re.sub(r'[^a-zA-Z0-9ㄱ-ㅣ가-힣()㎡]', '', str(c)).strip()
 
 def to_int_str(val):
@@ -55,9 +55,10 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', str(s))]
 
 @st.cache_data(show_spinner="정보를 분석 중입니다...")
-def powerful_search(query_str):
+def search_building(query_str):
     if not os.path.exists("suwon_building_master.csv.gz"): return None, None, None, None
-    
+
+    # 입력값 전처리 (동, 본번, 부번 추출)
     nums = re.findall(r'\d+', query_str)
     q_main = str(int(nums[0])) if len(nums) > 0 else ""
     q_sub = str(int(nums[1])) if len(nums) > 1 else "0"
@@ -65,32 +66,39 @@ def powerful_search(query_str):
     is_san = '2' if '산' in query_str else '1'
 
     matched_results = []
+    
+    # 마스터 파일 검색
     for chunk in pd.read_csv("suwon_building_master.csv.gz", dtype=str, chunksize=50000):
-        chunk.columns = [clean_val(c) for c in chunk.columns]
-        chunk['n_main'] = chunk['번'].apply(to_int_str)
-        chunk['n_sub'] = chunk['지'].apply(to_int_str)
+        chunk.columns = [clean_col_name(c) for c in chunk.columns]
         
-        mask = (chunk['n_main'] == q_main) & (chunk['n_sub'] == q_sub) & (chunk['대지구분코드'] == is_san)
-        if q_dong: mask &= chunk['대지위치'].str.contains(q_dong, na=False)
+        # 0006 -> 6 으로 변환하여 비교
+        chunk['norm_main'] = chunk['번'].apply(to_int_str)
+        chunk['norm_sub'] = chunk['지'].apply(to_int_str)
+        
+        # 정밀 숫자 매칭
+        mask = (chunk['norm_main'] == q_main) & (chunk['norm_sub'] == q_sub) & (chunk['대지구분코드'] == is_san)
+        if q_dong:
+            mask &= chunk['대지위치'].str.contains(q_dong, na=False)
         
         res = chunk[mask]
-        if not res.empty: matched_results.extend(res.to_dict('records'))
+        if not res.empty:
+            matched_results.extend(res.to_dict('records'))
 
     if not matched_results: return None, None, None, None
 
     pks = [r['관리건축물대장PK'] for r in matched_results]
     
-    # 층별 정보 및 전유부 로드
+    # 층별 상세 및 전유부 데이터 로드
     floor = pd.read_csv("suwon_floor_info.csv.gz", dtype=str)
-    floor.columns = [clean_val(c) for c in floor.columns]
+    floor.columns = [clean_col_name(c) for c in floor.columns]
     floor = floor[floor['관리건축물대장PK'].isin(pks)]
 
     status = pd.read_csv("suwon_unit_status.csv.gz", dtype=str)
-    status.columns = [clean_val(c) for c in status.columns]
+    status.columns = [clean_col_name(c) for c in status.columns]
     status = status[status['관리건축물대장PK'].isin(pks)]
 
     area = pd.read_csv("suwon_unit_area.csv.gz", dtype=str)
-    area.columns = [clean_val(c) for c in area.columns]
+    area.columns = [clean_col_name(c) for c in area.columns]
     area = area[(area['관리건축물대장PK'].isin(pks)) & (area.get('전유공용구분코드', '1') == '1')]
 
     gc.collect()
@@ -105,17 +113,19 @@ with st.form("search_form"):
 
 if submitted:
     if query:
-        results, floor_df, status_df, area_df = powerful_search(query)
+        results, floor_df, status_df, area_df = search_building(query)
+        
         if results:
             st.success(f"✅ 총 {len(results)}개의 건축물을 찾았습니다.")
             for idx, item in enumerate(results):
                 pk = item['관리건축물대장PK']
-                # nan 처리된 제목 생성
+                # nan 방지 제목 생성
                 b_name = str(item.get('건물명', '')).replace('nan', '').strip()
                 d_name = str(item.get('동명칭', '')).replace('nan', '').strip()
                 title = f"{b_name} {f'({d_name})' if d_name else ''}".strip() or f"건축물 {idx+1}"
 
                 st.markdown(f'<div class="bld-header">📌 {title}</div>', unsafe_allow_html=True)
+                
                 st.markdown(f"""
                 <div class="address-box">
                     <div style="font-size: 14px; color: #555;">📍 지번: {item.get('대지위치', '-')}</div>
@@ -132,9 +142,10 @@ if submitted:
                 st.markdown('<div class="info-card">', unsafe_allow_html=True)
                 st.write(f"🏢 **주용도:** {item.get('주용도코드명', '-')}  |  📅 **사용승인:** {item.get('사용승인일', '-')}")
                 
-                # --- [수정된 층별 상세 현황 섹션] ---
+                # --- [개선된 상세 현황 표 섹션] ---
                 st.markdown("<br><b>📊 층별 상세 현황</b>", unsafe_allow_html=True)
                 
+                # 집합건축물 (다세대 등)
                 if "집합" in str(item.get('대장구분코드명', '')):
                     t_stat = status_df[status_df['관리건축물대장PK'] == pk]
                     t_area = area_df[area_df['관리건축물대장PK'] == pk]
@@ -148,6 +159,8 @@ if submitted:
                             table_html += f'<tr><td class="row-floor">{u.get("층번호")}층 {u.get("호명칭")}</td><td>{u.get("주용도코드명", "-")}</td><td class="row-area">{u.get("면적(㎡)", "-")} ㎡</td></tr>'
                         table_html += '</table>'
                         st.markdown(table_html, unsafe_allow_html=True)
+                
+                # 일반건축물 (단독, 다가구 등)
                 else:
                     t_f = floor_df[floor_df['관리건축물대장PK'] == pk].copy()
                     if not t_f.empty:
@@ -157,12 +170,14 @@ if submitted:
                         table_html = '<table class="custom-table"><tr><th>층</th><th>용도</th><th style="text-align:center;">가구/호</th><th style="text-align:right;">면적</th></tr>'
                         for _, f in t_f.iterrows():
                             etc = str(f.get('기타용도', ''))
+                            # 기타용도에서 숫자+가구/호 추출
                             g = re.search(r'(\d+)\s*(가구|호)', etc)
                             unit_info = g.group(0) if g else "-"
                             
                             table_html += f'<tr><td class="row-floor">{f.get("층번호")}층</td><td>{f.get("주용도코드명", "-")}</td><td class="row-unit">{unit_info}</td><td class="row-area">{f.get("면적(㎡)", "-")} ㎡</td></tr>'
                         table_html += '</table>'
                         st.markdown(table_html, unsafe_allow_html=True)
+                
                 st.markdown('</div>', unsafe_allow_html=True)
         else:
             st.error("정확히 일치하는 지번이 없습니다.")
