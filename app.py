@@ -2,9 +2,10 @@ import streamlit as st
 import pandas as pd
 import re
 import os
+import textwrap
 
 # ==========================================
-# 1. 프리미엄 실무 브리핑용 UI 세팅
+# 1. 프리미엄 실무용 UI 디자인 세팅
 # ==========================================
 st.set_page_config(page_title="원탑 건축물대장 추출기", layout="centered")
 
@@ -14,32 +15,7 @@ st.markdown("""
     html, body, [class*="css"] { font-family: 'Noto Sans KR', sans-serif !important; background-color: #f8fafc; }
     
     div[data-testid="stTextInput"] input { border: 2px solid #cbd5e1 !important; border-radius: 12px; padding: 15px 20px !important; font-size: 20px !important; font-weight: 700; color: #1e293b; }
-    div[data-testid="stTextInput"] input:focus { border-color: #2563eb !important; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1) !important; }
     div[data-testid="stFormSubmitButton"] button { width: 100%; background-color: #1e293b !important; color: white !important; font-weight: 800; border-radius: 12px; padding: 12px; font-size: 20px; transition: 0.2s; }
-
-    .dashboard-card { background: #ffffff; border-radius: 20px; padding: 30px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); margin-bottom: 40px; border: 1px solid #e2e8f0; }
-    
-    .bld-title { font-size: 30px; font-weight: 900; color: #0f172a; margin-bottom: 15px; }
-    .bld-addr { font-size: 19px; color: #475569; line-height: 1.6; font-weight: 500; background: #f1f5f9; padding: 15px; border-radius: 12px; margin-bottom: 25px; }
-
-    .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 15px; }
-    .metric-box { background: #ffffff; border: 2px solid #f1f5f9; border-radius: 15px; padding: 20px 10px; text-align: center; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.02); }
-    .metric-label { font-size: 15px; font-weight: 700; color: #64748b; margin-bottom: 8px; }
-    .metric-value { font-size: 26px; font-weight: 900; color: #2563eb; }
-
-    .sub-info-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-bottom: 35px; }
-    .sub-box { background: #1e293b; color: white; border-radius: 12px; padding: 20px; text-align: center; }
-    .sub-label { font-size: 14px; color: #94a3b8; font-weight: 700; margin-bottom: 5px; }
-    .sub-value { font-size: 22px; font-weight: 900; }
-    .highlight-date { color: #fbbf24; }
-
-    .table-container { margin-top: 20px; border-radius: 12px; overflow: hidden; border: 1px solid #e2e8f0; }
-    .custom-table { width: 100%; border-collapse: collapse; background: white; }
-    .custom-table th { background: #f8fafc; color: #334155; padding: 15px; font-size: 16px; font-weight: 800; border-bottom: 2px solid #e2e8f0; text-align: center; }
-    .custom-table td { padding: 15px; font-size: 17px; text-align: center; border-bottom: 1px solid #f1f5f9; color: #1e293b; }
-    .td-floor { font-weight: 800; color: #2563eb; }
-    .td-unit { font-weight: 800; color: #ea580c; }
-    .td-area { font-weight: 800; text-align: right; padding-right: 25px !important; color: #0f172a; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -111,6 +87,7 @@ if submitted and query:
                 pk = b.get('관리건축물대장PK', '')
                 title = f"{b.get('건물명', '')} {b.get('동명칭', '')}".strip() or "일반 건축물"
                 
+                # 층별 상세 표 HTML 생성
                 table_html = ""
                 is_jibhap = "집합" in str(b.get('대장구분코드명', ''))
                 
@@ -123,9 +100,9 @@ if submitted and query:
                         merged['sort'] = merged['호명칭'].apply(natural_sort)
                         merged = merged.sort_values('sort').drop_duplicates(['층번호', '호명칭'])
                         
-                        table_html = '<div class="table-container"><table class="custom-table"><tr><th>층/호</th><th>용도</th><th style="text-align:right; padding-right:25px;">전용면적</th></tr>'
+                        table_html = '<div style="margin-top:20px; border-radius:12px; overflow:hidden; border:1px solid #e2e8f0;"><table style="width:100%; border-collapse:collapse; background:white;"><tr><th style="background:#f8fafc; padding:15px; border-bottom:2px solid #e2e8f0;">층/호</th><th style="background:#f8fafc; padding:15px; border-bottom:2px solid #e2e8f0;">용도</th><th style="background:#f8fafc; padding:15px; border-bottom:2px solid #e2e8f0; text-align:right; padding-right:25px;">전용면적</th></tr>'
                         for _, r in merged.iterrows():
-                            table_html += f'<tr><td class="td-floor">{r.get("층번호")}층 {r.get("호명칭")}</td><td>{r.get("주용도코드명", "-")}</td><td class="td-area">{r.get("면적(㎡)", "-")} ㎡</td></tr>'
+                            table_html += f'<tr><td style="padding:15px; border-bottom:1px solid #f1f5f9; text-align:center; font-weight:800; color:#2563eb;">{r.get("층번호")}층 {r.get("호명칭")}</td><td style="padding:15px; border-bottom:1px solid #f1f5f9; text-align:center;">{r.get("주용도코드명", "-")}</td><td style="padding:15px; border-bottom:1px solid #f1f5f9; text-align:right; padding-right:25px; font-weight:800;">{r.get("면적(㎡)", "-")} ㎡</td></tr>'
                         table_html += '</table></div>'
                 elif not df_floor.empty:
                     my_f = df_floor[df_floor['관리건축물대장PK'] == pk]
@@ -133,38 +110,52 @@ if submitted and query:
                         my_f = my_f.copy().fillna("").astype(str) 
                         my_f['sort'] = my_f['층번호'].apply(natural_sort)
                         my_f = my_f.sort_values('sort')
-                        table_html = '<div class="table-container"><table class="custom-table"><tr><th>층</th><th>용도</th><th>가구/호</th><th style="text-align:right; padding-right:25px;">면적</th></tr>'
+                        table_html = '<div style="margin-top:20px; border-radius:12px; overflow:hidden; border:1px solid #e2e8f0;"><table style="width:100%; border-collapse:collapse; background:white;"><tr><th style="background:#f8fafc; padding:15px; border-bottom:2px solid #e2e8f0;">층</th><th style="background:#f8fafc; padding:15px; border-bottom:2px solid #e2e8f0;">용도</th><th style="background:#f8fafc; padding:15px; border-bottom:2px solid #e2e8f0;">가구/호</th><th style="background:#f8fafc; padding:15px; border-bottom:2px solid #e2e8f0; text-align:right; padding-right:25px;">면적</th></tr>'
                         for _, r in my_f.iterrows():
                             unit_match = re.search(r'(\d+)\s*(가구|호)', str(r.get('기타용도', '')))
-                            extracted_unit = unit_match.group(0) if unit_match else "-"
-                            table_html += f'<tr><td class="td-floor">{r.get("층번호")}층</td><td>{r.get("주용도코드명", "-")}</td><td class="td-unit">{extracted_unit}</td><td class="td-area">{r.get("면적(㎡)", "-")} ㎡</td></tr>'
+                            table_html += f'<tr><td style="padding:15px; border-bottom:1px solid #f1f5f9; text-align:center; font-weight:800; color:#2563eb;">{r.get("층번호")}층</td><td style="padding:15px; border-bottom:1px solid #f1f5f9; text-align:center;">{r.get("주용도코드명", "-")}</td><td style="padding:15px; border-bottom:1px solid #f1f5f9; text-align:center; font-weight:800; color:#ea580c;">{unit_match.group(0) if unit_match else "-"}</td><td style="padding:15px; border-bottom:1px solid #f1f5f9; text-align:right; padding-right:25px; font-weight:800;">{r.get("면적(㎡)", "-")} ㎡</td></tr>'
                         table_html += '</table></div>'
 
-                # 💡 버그 수정: 띄어쓰기를 완전히 제거하여 마크다운이 코드로 오해하지 않도록 만듦
-                html_block = f"""
-<div class="dashboard-card">
-    <div class="bld-title">📌 {title}</div>
-    <div class="bld-addr">
-        <b>📍 지번:</b> {b.get('대지위치', '-')}<br>
-        <b>🛣️ 도로명:</b> {b.get('도로명대지위치', '정보 없음')}
-    </div>
-    
-    <div class="metric-grid">
-        <div class="metric-box"><div class="metric-label">층수</div><div class="metric-value">{b.get('지상층수', '0')}층</div></div>
-        <div class="metric-box"><div class="metric-label">세대/가구</div><div class="metric-value">{safe_int(b.get('가구수(가구)')) + safe_int(b.get('세대수(세대)'))}호</div></div>
-        <div class="metric-box"><div class="metric-label">주차대수</div><div class="metric-value">{safe_int(b.get('옥내자주식대수(대)')) + safe_int(b.get('옥외자주식대수(대)'))}대</div></div>
-        <div class="metric-box"><div class="metric-label">엘리베이터</div><div class="metric-value">{safe_int(b.get('승용승강기수')) + safe_int(b.get('비상용승강기수'))}대</div></div>
-    </div>
-    
-    <div class="sub-info-grid">
-        <div class="sub-box"><div class="sub-label">🏢 주용도</div><div class="sub-value">{b.get('주용도코드명', '-')}</div></div>
-        <div class="sub-box"><div class="sub-label">📅 사용승인일</div><div class="sub-value highlight-date">{format_date(b.get('사용승인일', '-'))}</div></div>
-    </div>
-    
-    <div style="font-size:22px; font-weight:800; color:#1e293b; margin-left:5px;">📊 층별 상세 현황</div>
-    {table_html if table_html else '<p style="text-align:center; padding:20px; color:#64748b;">상세 정보가 없습니다.</p>'}
+                # 💡 핵심: 띄어쓰기를 완전히 제거하여 코드 노출 버그 방지
+                dashboard_html = textwrap.dedent(f"""
+<div style="background:white; border-radius:20px; padding:30px; box-shadow:0 10px 25px rgba(0,0,0,0.05); border:1px solid #e2e8f0; margin-bottom:40px;">
+<div style="font-size:30px; font-weight:900; color:#0f172a; margin-bottom:15px;">📌 {title}</div>
+<div style="font-size:19px; color:#475569; line-height:1.6; font-weight:500; background:#f1f5f9; padding:15px; border-radius:12px; margin-bottom:25px;">
+<b>📍 지번:</b> {b.get('대지위치', '-')}<br>
+<b>🛣️ 도로명:</b> {b.get('도로명대지위치', '정보 없음')}
 </div>
-"""
-                st.markdown(html_block, unsafe_allow_html=True)
+<div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:12px;">
+<div style="background:#ffffff; border:2px solid #f1f5f9; border-radius:15px; padding:20px 10px; text-align:center;">
+<div style="font-size:15px; font-weight:700; color:#64748b; margin-bottom:8px;">층수</div>
+<div style="font-size:26px; font-weight:900; color:#2563eb;">{b.get('지상층수', '0')}층</div>
+</div>
+<div style="background:#ffffff; border:2px solid #f1f5f9; border-radius:15px; padding:20px 10px; text-align:center;">
+<div style="font-size:15px; font-weight:700; color:#64748b; margin-bottom:8px;">세대/가구</div>
+<div style="font-size:26px; font-weight:900; color:#2563eb;">{safe_int(b.get('가구수(가구)')) + safe_int(b.get('세대수(세대)'))}호</div>
+</div>
+<div style="background:#ffffff; border:2px solid #f1f5f9; border-radius:15px; padding:20px 10px; text-align:center;">
+<div style="font-size:15px; font-weight:700; color:#64748b; margin-bottom:8px;">주차대수</div>
+<div style="font-size:26px; font-weight:900; color:#2563eb;">{safe_int(b.get('옥내자주식대수(대)')) + safe_int(b.get('옥외자주식대수(대)'))}대</div>
+</div>
+<div style="background:#ffffff; border:2px solid #f1f5f9; border-radius:15px; padding:20px 10px; text-align:center;">
+<div style="font-size:15px; font-weight:700; color:#64748b; margin-bottom:8px;">엘리베이터</div>
+<div style="font-size:26px; font-weight:900; color:#2563eb;">{safe_int(b.get('승용승강기수')) + safe_int(b.get('비상용승강기수'))}대</div>
+</div>
+</div>
+<div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:12px; margin-bottom:30px;">
+<div style="background:#1e293b; color:white; border-radius:12px; padding:20px; text-align:center;">
+<div style="font-size:14px; color:#94a3b8; font-weight:700; margin-bottom:5px;">주용도</div>
+<div style="font-size:22px; font-weight:900;">{b.get('주용도코드명', '-')}</div>
+</div>
+<div style="background:#1e293b; color:white; border-radius:12px; padding:20px; text-align:center;">
+<div style="font-size:14px; color:#94a3b8; font-weight:700; margin-bottom:5px;">사용승인일</div>
+<div style="font-size:22px; font-weight:900; color:#fbbf24;">{format_date(b.get('사용승인일', '-'))}</div>
+</div>
+</div>
+<div style="font-size:22px; font-weight:800; color:#1e293b; margin-left:5px;">📊 층별 상세 현황</div>
+{table_html if table_html else '<p style="text-align:center; padding:20px; color:#64748b;">상세 정보가 없습니다.</p>'}
+</div>
+""").strip()
+                st.markdown(dashboard_html, unsafe_allow_html=True)
         else:
             st.error("검색 결과가 없습니다.")
