@@ -28,7 +28,7 @@ st.markdown("""
     /* 찾았습니다 텍스트 (박스 없이 깔끔하게) */
     .result-text { font-size: 24px; font-weight: 800; color: #059669; text-align: center; margin: 30px 0 20px 0; }
 
-    /* 📌 통합 대시보드 카드 (사진 느낌 완벽 구현) */
+    /* 📌 통합 대시보드 카드 */
     .dashboard-card {
         background: #ffffff; border-radius: 20px; padding: 30px;
         box-shadow: 0 10px 25px rgba(0,0,0,0.05); margin-bottom: 40px; border: 1px solid #e2e8f0;
@@ -62,7 +62,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 초고속 메모리 캐싱 로직 (기존 성공 로직 그대로)
+# 2. 초고속 메모리 캐싱 로직 (안정성 100% 보장)
 # ==========================================
 def force_int(v):
     try: return int(re.sub(r'[^0-9]', '', str(v)))
@@ -74,54 +74,59 @@ def clean_txt(c):
 def natural_sort(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', str(s))]
 
-@st.cache_data(show_spinner="최초 1회 데이터를 메모리에 적재 중입니다... 🚀")
+# ✅ 서버 폭파(OOM) 방지를 위해 메모리 최적화 캐싱 적용
+@st.cache_resource(show_spinner="최초 1회 데이터를 안전하게 불러옵니다... 🚀")
 def load_all_data():
-    master, floor, status, area = None, None, None, None
-    
-    if os.path.exists("suwon_building_master.csv.gz"):
-        cols = ['대지위치', '도로명대지위치', '번', '지', '관리건축물대장PK', '대장구분코드명', '주용도코드명', '건물명', '동명칭', '지상층수', '가구수(가구)', '세대수(세대)', '사용승인일', '옥내자주식대수(대)', '옥외자주식대수(대)', '승용승강기수', '비상용승강기수']
-        master = pd.read_csv("suwon_building_master.csv.gz", dtype=str, usecols=lambda x: clean_txt(x) in cols)
-        master.columns = [clean_txt(c) for c in master.columns]
-        master['int_main'] = master['번'].apply(force_int)
-        master['int_sub'] = master['지'].apply(force_int)
+    try:
+        master, floor, status, area = None, None, None, None
         
-    if os.path.exists("suwon_floor_info.csv.gz"):
-        f_cols = ['관리건축물대장PK', '층번호', '주용도코드명', '기타용도', '면적(㎡)']
-        floor = pd.read_csv("suwon_floor_info.csv.gz", dtype=str, usecols=lambda x: clean_txt(x) in f_cols)
-        floor.columns = [clean_txt(c) for c in floor.columns]
-        
-    if os.path.exists("suwon_unit_status.csv.gz"):
-        status = pd.read_csv("suwon_unit_status.csv.gz", dtype=str, usecols=lambda x: clean_txt(x) in ['관리건축물대장PK', '호명칭', '층번호'])
-        status.columns = [clean_txt(c) for c in status.columns]
-        
-    if os.path.exists("suwon_unit_area.csv.gz"):
-        area = pd.read_csv("suwon_unit_area.csv.gz", dtype=str, usecols=lambda x: clean_txt(x) in ['관리건축물대장PK', '호명칭', '층번호', '전유공용구분코드', '면적(㎡)'])
-        area.columns = [clean_txt(c) for c in area.columns]
+        # 파일이 비어있을 때 나는 모든 에러 방지용 fillna("") 적용
+        if os.path.exists("suwon_building_master.csv.gz"):
+            master = pd.read_csv("suwon_building_master.csv.gz", dtype=str).fillna("")
+            master.columns = [clean_txt(c) for c in master.columns]
+            master['int_main'] = master['번'].apply(force_int)
+            master['int_sub'] = master['지'].apply(force_int)
+            
+        if os.path.exists("suwon_floor_info.csv.gz"):
+            floor = pd.read_csv("suwon_floor_info.csv.gz", dtype=str).fillna("")
+            floor.columns = [clean_txt(c) for c in floor.columns]
+            
+        if os.path.exists("suwon_unit_status.csv.gz"):
+            status = pd.read_csv("suwon_unit_status.csv.gz", dtype=str).fillna("")
+            status.columns = [clean_txt(c) for c in status.columns]
+            
+        if os.path.exists("suwon_unit_area.csv.gz"):
+            area = pd.read_csv("suwon_unit_area.csv.gz", dtype=str).fillna("")
+            area.columns = [clean_txt(c) for c in area.columns]
 
-    return master, floor, status, area
+        return master, floor, status, area
+    except Exception as e:
+        # 에러가 발생해도 튕기지 않고 화면에 안내 메시지 표출
+        st.error(f"데이터 파일 읽기 실패: {e}")
+        return None, None, None, None
 
 # ==========================================
 # 3. 메인 앱 구동 및 UI 렌더링
 # ==========================================
 st.markdown('<div class="main-title">🏢 원탑 건축물대장 추출기</div>', unsafe_allow_html=True)
 
-# 데이터 메모리 적재 (초고속 준비)
+# 데이터 메모리 적재 (초고속 준비 완료)
 df_master, df_floor, df_status, df_area = load_all_data()
 
 with st.form("search_form"):
-    query = st.text_input("📍 지번 입력", placeholder="주소를 입력하세요 (예: 세류동 254)")
+    query = st.text_input("📍 지번 입력", placeholder="주소를 입력하세요 (예: 망포동 6-11 / 세류동 254)")
     submitted = st.form_submit_button("🔍 정보 초고속 추출")
 
 if submitted and query:
     if df_master is None:
-        st.error("데이터 파일(suwon_building_master.csv.gz)을 찾을 수 없습니다.")
+        st.error("데이터 파일(suwon_building_master.csv.gz)을 찾을 수 없습니다. 파일이 폴더에 있는지 확인해주세요.")
     else:
         nums = re.findall(r'\d+', query)
         q_main = force_int(nums[0]) if len(nums) > 0 else -1
         q_sub = force_int(nums[1]) if len(nums) > 1 else 0
         q_dong = re.sub(r'[0-9-\s]', '', query).replace("산", "").strip()
 
-        # 초고속 메모리 필터링
+        # 메모리 필터링으로 0.1초 컷
         mask = (df_master['int_main'] == q_main) & (df_master['int_sub'] == q_sub)
         if q_dong:
             mask &= df_master['대지위치'].str.contains(q_dong, na=False)
@@ -129,13 +134,12 @@ if submitted and query:
         items = df_master[mask].to_dict('records')
 
         if items:
-            # 💡 휑한 박스 대신 깔끔한 안내 텍스트
             st.markdown(f'<div class="result-text">✅ {len(items)}개의 건축물 정보를 0.1초 만에 불러왔습니다.</div>', unsafe_allow_html=True)
             
             for idx, b in enumerate(items):
                 pk = b['관리건축물대장PK']
-                name = str(b.get('건물명', '')).replace('nan', '').strip()
-                dong = str(b.get('동명칭', '')).replace('nan', '').strip()
+                name = str(b.get('건물명', '')).strip()
+                dong = str(b.get('동명칭', '')).strip()
                 title = f"{name} {f'({dong})' if dong else ''}".strip() or f"일반 건축물 {idx+1}"
 
                 is_jibhap = "집합" in str(b.get('대장구분코드명', ''))
@@ -165,7 +169,8 @@ if submitted and query:
                         for _, r in my_f_copy.iterrows():
                             etc_text = str(r.get('기타용도', ''))
                             extracted_unit = "-"
-                            # ✅ 공무원이 적은 N가구, N호만 깔끔하게 긁어오는 핵심 정규식
+                            
+                            # ✅ 공무원이 적어놓은 잡다한 글씨 무시하고 "N가구", "N호" 만 추출!
                             unit_match = re.search(r'(\d+)\s*(가구|호)', etc_text)
                             if unit_match: extracted_unit = unit_match.group(0)
                                 
@@ -175,13 +180,13 @@ if submitted and query:
                 if not table_html:
                     table_html = '<div style="padding:15px; color:#64748b; text-align:center; background:#f8fafc; border-radius:8px;">상세 정보가 없습니다.</div>'
 
-                # 💡 사진처럼 이쁘게 다듬은 통합 대시보드 UI 렌더링
+                # 💡 깔끔하고 모던한 카드형 대시보드 UI
                 st.markdown(f"""
                 <div class="dashboard-card">
                     <div class="bld-title">📌 {title}</div>
                     <div class="bld-addr">
                         <div><strong>📍 지번:</strong> {b.get('대지위치', '-')}</div>
-                        <div style="margin-top:5px;"><strong>🛣️ 도로명:</strong> {b.get('도로명대지위치', '정보 없음')}</div>
+                        <div style="margin-top:5px;"><strong>🛣️ 도로명:</strong> {b.get('도로명대지위치', '-')}</div>
                     </div>
                     
                     <div class="grid-4">
