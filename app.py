@@ -119,7 +119,6 @@ if submitted and query:
                     my_a = df_area[df_area['관리건축물대장PK'] == pk]
                     if not my_s.empty and not my_a.empty:
                         merged = pd.merge(my_s, my_a, on=['관리건축물대장PK', '층번호', '호명칭'], how='inner')
-                        # ✅ 에러 방지 핵심: 숫자가 아닌 이상한 값이 있어도 에러 안나게 무조건 str로 바꾼 뒤 표출
                         merged = merged.fillna("").astype(str) 
                         merged['sort'] = merged['호명칭'].apply(natural_sort)
                         merged = merged.sort_values('sort').drop_duplicates(['층번호', '호명칭'])
@@ -131,7 +130,7 @@ if submitted and query:
                 elif not df_floor.empty:
                     my_f = df_floor[df_floor['관리건축물대장PK'] == pk]
                     if not my_f.empty:
-                        my_f = my_f.copy().fillna("").astype(str) # ✅ 에러 방지 핵심 2
+                        my_f = my_f.copy().fillna("").astype(str) 
                         my_f['sort'] = my_f['층번호'].apply(natural_sort)
                         my_f = my_f.sort_values('sort')
                         table_html = '<div class="table-container"><table class="custom-table"><tr><th>층</th><th>용도</th><th>가구/호</th><th style="text-align:right; padding-right:25px;">면적</th></tr>'
@@ -141,29 +140,31 @@ if submitted and query:
                             table_html += f'<tr><td class="td-floor">{r.get("층번호")}층</td><td>{r.get("주용도코드명", "-")}</td><td class="td-unit">{extracted_unit}</td><td class="td-area">{r.get("면적(㎡)", "-")} ㎡</td></tr>'
                         table_html += '</table></div>'
 
-                st.markdown(f"""
-                <div class="dashboard-card">
-                    <div class="bld-title">📌 {title}</div>
-                    <div class="bld-addr">
-                        <b>📍 지번:</b> {b.get('대지위치', '-')}<br>
-                        <b>🛣️ 도로명:</b> {b.get('도로명대지위치', '정보 없음')}
-                    </div>
-                    
-                    <div class="metric-grid">
-                        <div class="metric-box"><div class="metric-label">층수</div><div class="metric-value">{b.get('지상층수', '0')}층</div></div>
-                        <div class="metric-box"><div class="metric-label">세대/가구</div><div class="metric-value">{safe_int(b.get('가구수(가구)')) + safe_int(b.get('세대수(세대)'))}호</div></div>
-                        <div class="metric-box"><div class="metric-label">주차대수</div><div class="metric-value">{safe_int(b.get('옥내자주식대수(대)')) + safe_int(b.get('옥외자주식대수(대)'))}대</div></div>
-                        <div class="metric-box"><div class="metric-label">엘리베이터</div><div class="metric-value">{safe_int(b.get('승용승강기수')) + safe_int(b.get('비상용승강기수'))}대</div></div>
-                    </div>
-                    
-                    <div class="sub-info-grid">
-                        <div class="sub-box"><div class="sub-label">🏢 주용도</div><div class="sub-value">{b.get('주용도코드명', '-')}</div></div>
-                        <div class="sub-box"><div class="sub-label">📅 사용승인일</div><div class="sub-value highlight-date">{format_date(b.get('사용승인일', '-'))}</div></div>
-                    </div>
-                    
-                    <div style="font-size:22px; font-weight:800; color:#1e293b; margin-left:5px;">📊 층별 상세 현황</div>
-                    {table_html if table_html else '<p style="text-align:center; padding:20px; color:#64748b;">상세 정보가 없습니다.</p>'}
-                </div>
-                """, unsafe_allow_html=True)
+                # 💡 버그 수정: 띄어쓰기를 완전히 제거하여 마크다운이 코드로 오해하지 않도록 만듦
+                html_block = f"""
+<div class="dashboard-card">
+    <div class="bld-title">📌 {title}</div>
+    <div class="bld-addr">
+        <b>📍 지번:</b> {b.get('대지위치', '-')}<br>
+        <b>🛣️ 도로명:</b> {b.get('도로명대지위치', '정보 없음')}
+    </div>
+    
+    <div class="metric-grid">
+        <div class="metric-box"><div class="metric-label">층수</div><div class="metric-value">{b.get('지상층수', '0')}층</div></div>
+        <div class="metric-box"><div class="metric-label">세대/가구</div><div class="metric-value">{safe_int(b.get('가구수(가구)')) + safe_int(b.get('세대수(세대)'))}호</div></div>
+        <div class="metric-box"><div class="metric-label">주차대수</div><div class="metric-value">{safe_int(b.get('옥내자주식대수(대)')) + safe_int(b.get('옥외자주식대수(대)'))}대</div></div>
+        <div class="metric-box"><div class="metric-label">엘리베이터</div><div class="metric-value">{safe_int(b.get('승용승강기수')) + safe_int(b.get('비상용승강기수'))}대</div></div>
+    </div>
+    
+    <div class="sub-info-grid">
+        <div class="sub-box"><div class="sub-label">🏢 주용도</div><div class="sub-value">{b.get('주용도코드명', '-')}</div></div>
+        <div class="sub-box"><div class="sub-label">📅 사용승인일</div><div class="sub-value highlight-date">{format_date(b.get('사용승인일', '-'))}</div></div>
+    </div>
+    
+    <div style="font-size:22px; font-weight:800; color:#1e293b; margin-left:5px;">📊 층별 상세 현황</div>
+    {table_html if table_html else '<p style="text-align:center; padding:20px; color:#64748b;">상세 정보가 없습니다.</p>'}
+</div>
+"""
+                st.markdown(html_block, unsafe_allow_html=True)
         else:
             st.error("검색 결과가 없습니다.")
