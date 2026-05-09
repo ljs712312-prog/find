@@ -13,7 +13,6 @@ st.markdown("""
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&display=swap');
     html, body, [class*="css"] { font-family: 'Noto Sans KR', sans-serif !important; background-color: #f4f6f8; }
     
-    /* 검색창 & 버튼 세련되게 */
     .main-title { font-size: 36px; font-weight: 900; color: #111827; margin-bottom: 25px; text-align: center; letter-spacing: -1px; }
     div[data-testid="stTextInput"] input {
         border: 2px solid #cbd5e1 !important; border-radius: 12px; padding: 20px !important; font-size: 22px !important; font-weight: 700; color: #1e293b;
@@ -25,32 +24,25 @@ st.markdown("""
     }
     div[data-testid="stFormSubmitButton"] button:hover { background-color: #0f172a !important; transform: translateY(-2px); }
 
-    /* 찾았습니다 텍스트 (박스 없이 깔끔하게) */
     .result-text { font-size: 24px; font-weight: 800; color: #059669; text-align: center; margin: 30px 0 20px 0; }
 
-    /* 📌 통합 대시보드 카드 */
     .dashboard-card {
         background: #ffffff; border-radius: 20px; padding: 30px;
         box-shadow: 0 10px 25px rgba(0,0,0,0.05); margin-bottom: 40px; border: 1px solid #e2e8f0;
     }
     
-    /* 주소 영역 */
     .bld-title { font-size: 28px; font-weight: 900; color: #0f172a; margin-bottom: 15px; display: flex; align-items: center; gap: 8px; }
     .bld-addr { font-size: 18px; color: #475569; margin-bottom: 25px; line-height: 1.6; font-weight: 500; background: #f8fafc; padding: 15px; border-radius: 12px; }
     .bld-addr strong { color: #1e293b; }
 
-    /* 6대 핵심 지표 그리드 (4칸 + 2칸) */
     .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
     .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 30px; }
-    .info-box {
-        background: #ffffff; border: 1px solid #cbd5e1; border-radius: 12px; padding: 20px 10px; text-align: center;
-    }
+    .info-box { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 12px; padding: 20px 10px; text-align: center; }
     .info-box.highlight { background: #f8fafc; border-color: #e2e8f0; }
     .info-label { font-size: 15px; font-weight: 700; color: #64748b; margin-bottom: 8px; }
     .info-value { font-size: 24px; font-weight: 900; color: #2563eb; }
     .info-value.dark { color: #0f172a; font-size: 22px; }
 
-    /* 층별 상세 현황 표 */
     .table-title { font-size: 22px; font-weight: 800; color: #1e293b; margin-bottom: 15px; padding-left: 10px; border-left: 4px solid #3b82f6; }
     .custom-table { width: 100%; border-collapse: collapse; border-radius: 12px; overflow: hidden; box-shadow: 0 0 0 1px #e2e8f0; }
     .custom-table th { background: #f1f5f9; color: #334155; padding: 16px; font-size: 16px; font-weight: 800; text-align: center; border-bottom: 2px solid #cbd5e1; }
@@ -62,7 +54,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 초고속 메모리 캐싱 로직 (안정성 100% 보장)
+# 2. 무적 방어막 메모리 캐싱 로직
 # ==========================================
 def force_int(v):
     try: return int(re.sub(r'[^0-9]', '', str(v)))
@@ -74,34 +66,35 @@ def clean_txt(c):
 def natural_sort(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', str(s))]
 
-# ✅ 서버 폭파(OOM) 방지를 위해 메모리 최적화 캐싱 적용
 @st.cache_resource(show_spinner="최초 1회 데이터를 안전하게 불러옵니다... 🚀")
 def load_all_data():
     try:
-        master, floor, status, area = None, None, None, None
-        
-        # 파일이 비어있을 때 나는 모든 에러 방지용 fillna("") 적용
-        if os.path.exists("suwon_building_master.csv.gz"):
-            master = pd.read_csv("suwon_building_master.csv.gz", dtype=str).fillna("")
-            master.columns = [clean_txt(c) for c in master.columns]
-            master['int_main'] = master['번'].apply(force_int)
-            master['int_sub'] = master['지'].apply(force_int)
+        def safe_read(file_name, target_cols):
+            if not os.path.exists(file_name): return None
+            # 인코딩 오류 및 usecols 에러 원천 차단
+            try:
+                df = pd.read_csv(file_name, dtype=str, encoding='utf-8', on_bad_lines='skip').fillna("")
+            except:
+                df = pd.read_csv(file_name, dtype=str, encoding='cp949', on_bad_lines='skip').fillna("")
             
-        if os.path.exists("suwon_floor_info.csv.gz"):
-            floor = pd.read_csv("suwon_floor_info.csv.gz", dtype=str).fillna("")
-            floor.columns = [clean_txt(c) for c in floor.columns]
-            
-        if os.path.exists("suwon_unit_status.csv.gz"):
-            status = pd.read_csv("suwon_unit_status.csv.gz", dtype=str).fillna("")
-            status.columns = [clean_txt(c) for c in status.columns]
-            
-        if os.path.exists("suwon_unit_area.csv.gz"):
-            area = pd.read_csv("suwon_unit_area.csv.gz", dtype=str).fillna("")
-            area.columns = [clean_txt(c) for c in area.columns]
+            df.columns = [clean_txt(c) for c in df.columns]
+            avail_cols = [c for c in target_cols if c in df.columns]
+            return df[avail_cols] if avail_cols else df
+
+        m_cols = ['대지위치', '도로명대지위치', '번', '지', '관리건축물대장PK', '대장구분코드명', '주용도코드명', '건물명', '동명칭', '지상층수', '가구수(가구)', '세대수(세대)', '사용승인일', '옥내자주식대수(대)', '옥외자주식대수(대)', '승용승강기수', '비상용승강기수']
+        master = safe_read("suwon_building_master.csv.gz", m_cols)
+        if master is not None and not master.empty:
+            master['int_main'] = master.get('번', pd.Series()).apply(force_int)
+            master['int_sub'] = master.get('지', pd.Series()).apply(force_int)
+
+        f_cols = ['관리건축물대장PK', '층번호', '주용도코드명', '기타용도', '면적(㎡)']
+        floor = safe_read("suwon_floor_info.csv.gz", f_cols)
+
+        status = safe_read("suwon_unit_status.csv.gz", ['관리건축물대장PK', '호명칭', '층번호'])
+        area = safe_read("suwon_unit_area.csv.gz", ['관리건축물대장PK', '호명칭', '층번호', '전유공용구분코드', '면적(㎡)'])
 
         return master, floor, status, area
     except Exception as e:
-        # 에러가 발생해도 튕기지 않고 화면에 안내 메시지 표출
         st.error(f"데이터 파일 읽기 실패: {e}")
         return None, None, None, None
 
@@ -110,7 +103,6 @@ def load_all_data():
 # ==========================================
 st.markdown('<div class="main-title">🏢 원탑 건축물대장 추출기</div>', unsafe_allow_html=True)
 
-# 데이터 메모리 적재 (초고속 준비 완료)
 df_master, df_floor, df_status, df_area = load_all_data()
 
 with st.form("search_form"):
@@ -118,7 +110,7 @@ with st.form("search_form"):
     submitted = st.form_submit_button("🔍 정보 초고속 추출")
 
 if submitted and query:
-    if df_master is None:
+    if df_master is None or df_master.empty:
         st.error("데이터 파일(suwon_building_master.csv.gz)을 찾을 수 없습니다. 파일이 폴더에 있는지 확인해주세요.")
     else:
         nums = re.findall(r'\d+', query)
@@ -126,10 +118,9 @@ if submitted and query:
         q_sub = force_int(nums[1]) if len(nums) > 1 else 0
         q_dong = re.sub(r'[0-9-\s]', '', query).replace("산", "").strip()
 
-        # 메모리 필터링으로 0.1초 컷
         mask = (df_master['int_main'] == q_main) & (df_master['int_sub'] == q_sub)
         if q_dong:
-            mask &= df_master['대지위치'].str.contains(q_dong, na=False)
+            mask &= df_master.get('대지위치', pd.Series(dtype=str)).str.contains(q_dong, na=False)
             
         items = df_master[mask].to_dict('records')
 
@@ -137,50 +128,49 @@ if submitted and query:
             st.markdown(f'<div class="result-text">✅ {len(items)}개의 건축물 정보를 0.1초 만에 불러왔습니다.</div>', unsafe_allow_html=True)
             
             for idx, b in enumerate(items):
-                pk = b['관리건축물대장PK']
+                pk = b.get('관리건축물대장PK', '')
                 name = str(b.get('건물명', '')).strip()
                 dong = str(b.get('동명칭', '')).strip()
                 title = f"{name} {f'({dong})' if dong else ''}".strip() or f"일반 건축물 {idx+1}"
 
                 is_jibhap = "집합" in str(b.get('대장구분코드명', ''))
                 
-                # 상세 표 HTML 생성 로직
                 table_html = ""
                 if is_jibhap and df_status is not None and df_area is not None:
                     my_s = df_status[df_status['관리건축물대장PK'] == pk]
                     my_a = df_area[df_area['관리건축물대장PK'] == pk]
                     if not my_s.empty and not my_a.empty:
                         merged = pd.merge(my_s, my_a, on=['관리건축물대장PK', '층번호', '호명칭'], how='inner')
-                        merged['sort'] = merged['호명칭'].apply(natural_sort)
-                        merged = merged.sort_values('sort').drop_duplicates(['층번호', '호명칭'])
+                        if '호명칭' in merged.columns:
+                            merged['sort'] = merged['호명칭'].apply(natural_sort)
+                            merged = merged.sort_values('sort').drop_duplicates(['층번호', '호명칭'])
                         
                         table_html = '<table class="custom-table"><tr><th>층/호</th><th>용도</th><th style="text-align:right; padding-right:20px;">전용면적</th></tr>'
                         for _, r in merged.iterrows():
-                            table_html += f'<tr><td class="td-floor">{r.get("층번호")}층 {r.get("호명칭")}</td><td>{r.get("주용도코드명", "-")}</td><td class="td-area" style="padding-right:20px;">{r.get("면적(㎡)", "-")} ㎡</td></tr>'
+                            table_html += f'<tr><td class="td-floor">{r.get("층번호", "-")}층 {r.get("호명칭", "-")}</td><td>{r.get("주용도코드명", "-")}</td><td class="td-area" style="padding-right:20px;">{r.get("면적(㎡)", "-")} ㎡</td></tr>'
                         table_html += '</table>'
                 elif df_floor is not None:
                     my_f = df_floor[df_floor['관리건축물대장PK'] == pk]
                     if not my_f.empty:
                         my_f_copy = my_f.copy()
-                        my_f_copy['sort'] = my_f_copy['층번호'].apply(natural_sort)
-                        my_f_copy = my_f_copy.sort_values('sort')
+                        if '층번호' in my_f_copy.columns:
+                            my_f_copy['sort'] = my_f_copy['층번호'].apply(natural_sort)
+                            my_f_copy = my_f_copy.sort_values('sort')
                         
                         table_html = '<table class="custom-table"><tr><th>층</th><th>용도</th><th>가구/호</th><th style="text-align:right; padding-right:20px;">면적</th></tr>'
                         for _, r in my_f_copy.iterrows():
                             etc_text = str(r.get('기타용도', ''))
                             extracted_unit = "-"
-                            
-                            # ✅ 공무원이 적어놓은 잡다한 글씨 무시하고 "N가구", "N호" 만 추출!
+                            # N가구, N호만 깔끔하게 긁어오는 핵심 정규식
                             unit_match = re.search(r'(\d+)\s*(가구|호)', etc_text)
                             if unit_match: extracted_unit = unit_match.group(0)
                                 
-                            table_html += f'<tr><td class="td-floor">{r.get("층번호")}층</td><td>{r.get("주용도코드명", "-")}</td><td class="td-unit">{extracted_unit}</td><td class="td-area" style="padding-right:20px;">{r.get("면적(㎡)", "-")} ㎡</td></tr>'
+                            table_html += f'<tr><td class="td-floor">{r.get("층번호", "-")}층</td><td>{r.get("주용도코드명", "-")}</td><td class="td-unit">{extracted_unit}</td><td class="td-area" style="padding-right:20px;">{r.get("면적(㎡)", "-")} ㎡</td></tr>'
                         table_html += '</table>'
 
                 if not table_html:
                     table_html = '<div style="padding:15px; color:#64748b; text-align:center; background:#f8fafc; border-radius:8px;">상세 정보가 없습니다.</div>'
 
-                # 💡 깔끔하고 모던한 카드형 대시보드 UI
                 st.markdown(f"""
                 <div class="dashboard-card">
                     <div class="bld-title">📌 {title}</div>
