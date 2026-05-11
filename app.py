@@ -63,7 +63,7 @@ st.markdown('<h2 style="text-align:center; font-weight:900;">🏢 원탑 건축�
 df_master, df_floor, df_status, df_area = load_data()
 
 with st.form("search_form"):
-    query = st.text_input("📍 지번 입력", placeholder="주소를 입력하세요 (예: 망포동 6-11)")
+    query = st.text_input("📍 지번 입력", placeholder="주소를 입력하세요 (예: 권선동 952-7)")
     submitted = st.form_submit_button("🔍 정보 확인하기")
 
 if submitted and query:
@@ -109,10 +109,9 @@ if submitted and query:
                 
                 st.write("#### 📊 층별 상세 현황")
                 
-                # ✅ 핵심 변경점: 분류(집합/일반) 상관없이 데이터가 존재하는 파일은 전부 뒤져서 띄워줌
                 data_found = False
 
-                # 1. 층별개요 데이터가 있는지 확인하고 표출
+                # 1. 일반/층별 현황
                 if not df_floor.empty:
                     my_f = df_floor[df_floor['관리건축물대장PK'] == pk]
                     if not my_f.empty:
@@ -124,18 +123,16 @@ if submitted and query:
                         my_f['층'] = my_f['층번호'] + "층"
                         my_f['면적'] = my_f['면적(㎡)'] + " ㎡"
                         
-                        def extract_unit(txt):
-                            m = re.search(r'(\d+)\s*(가구|호)', str(txt))
-                            return m.group(0) if m else "-"
-                        my_f['가구/호'] = my_f['기타용도'].apply(extract_unit)
+                        # ✅ 핵심 수정: 텍스트를 자르지 않고 '기타용도' 원본을 그대로 '상세용도'에 노출
+                        my_f['상세용도'] = my_f['기타용도'].apply(lambda x: str(x).strip() if str(x).strip() else "-")
                         
-                        disp_df = my_f[['층', '주용도코드명', '가구/호', '면적']].copy()
-                        disp_df.columns = ['층', '용도', '가구/호', '면적']
+                        disp_df = my_f[['층', '주용도코드명', '상세용도', '면적']].copy()
+                        disp_df.columns = ['층', '주용도', '상세용도', '면적']
                         
                         st.write("**(일반/층별 현황)**")
                         st.table(disp_df.set_index('층'))
 
-                # 2. 전유부/면적 데이터가 있는지 확인하고 표출 (위에서 층별 데이터를 그렸어도, 이것도 있으면 또 그림)
+                # 2. 집합/호실별 현황
                 if not df_status.empty and not df_area.empty:
                     my_s = df_status[df_status['관리건축물대장PK'] == pk]
                     my_a = df_area[df_area['관리건축물대장PK'] == pk]
@@ -153,7 +150,6 @@ if submitted and query:
                         st.write("**(집합/호실별 현황)**")
                         st.table(disp_df.set_index('층/호'))
 
-                # 3. 양쪽 다 아무 데이터도 없을 때만 없다고 표시
                 if not data_found:
                     st.write("해당 건축물의 층별 상세 정보가 다운로드한 공공데이터에 존재하지 않습니다.")
         else:
