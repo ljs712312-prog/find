@@ -12,6 +12,7 @@ st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&display=swap');
     html, body, [class*="css"] { font-family: 'Noto Sans KR', sans-serif !important; }
+    /* 핵심 정보 4분할 박스 예쁘게 선 긋기 */
     div[data-testid="metric-container"] {
         border: 2px solid #e5e7eb; padding: 15px; border-radius: 12px; text-align: center;
         background-color: transparent;
@@ -47,6 +48,7 @@ def load_data():
         except:
             df = pd.read_csv(filename, dtype=str, encoding='cp949', on_bad_lines='skip')
         df.columns = [clean_txt(c) for c in df.columns]
+        # 모든 데이터를 순수 문자로 강제 변환하여 화면 튕김 방지
         return df.fillna("").astype(str)
 
     master = read_file_safely("suwon_building_master.csv.gz")
@@ -63,12 +65,12 @@ st.markdown('<h2 style="text-align:center; font-weight:900;">🏢 원탑 건축�
 df_master, df_floor, df_status, df_area = load_data()
 
 with st.form("search_form"):
-    query = st.text_input("📍 지번 입력", placeholder="주소를 입력하세요 (예: 권선동 952-7)")
+    query = st.text_input("📍 지번 입력", placeholder="주소를 입력하세요 (예: 망포동 6-11)")
     submitted = st.form_submit_button("🔍 정보 확인하기")
 
 if submitted and query:
     if df_master.empty:
-        st.error("데이터 파일을 찾을 수 없습니다.")
+        st.error("데이터 파일을 찾을 수 없습니다. (data_compressor.py를 먼저 실행해주세요)")
     else:
         nums = re.findall(r'\d+', query)
         q_main, q_sub = (safe_int(nums[0]) if nums else -1), (safe_int(nums[1]) if len(nums) > 1 else 0)
@@ -83,7 +85,7 @@ if submitted and query:
         items = df_master[mask].to_dict('records')
 
         if items:
-            st.success(f"✅ {len(items)}건의 건축물 정보를 안전하게 불러왔습니다.")
+            st.success(f"✅ {len(items)}건의 건축물 정보를 성공적으로 불러왔습니다.")
             
             for b in items:
                 pk = b.get('관리건축물대장PK', '')
@@ -95,10 +97,10 @@ if submitted and query:
                 st.write(f"**📍 지번:** {b.get('대지위치', '-')}")
                 st.write(f"**🛣️ 도로명:** {b.get('도로명대지위치', '정보 없음')}")
                 
-                # ✅ 위반건축물 팩트 체크 및 강력 경고 UI 추가
+                # 🔥 위반건축물 경고창 표출 로직
                 violation_status = str(b.get('위반건축물여부', '')).strip()
-                if violation_status in ['1', 'Y', 'y', '참', '위반', 'O']:
-                    st.error("🚨 주의: 이 건물은 **[위반건축물]**로 등록되어 있습니다! (건축물대장 원본 열람 필수)")
+                if violation_status and violation_status not in ['0', 'N', 'n', '거짓', '무', 'nan', 'None', 'NaN', '']:
+                    st.error("🚨 주의: 이 건축물은 **[위반건축물]**로 등록되어 있습니다! (건축물대장 원본 열람 필수)")
                 
                 st.write("")
                 
@@ -117,7 +119,7 @@ if submitted and query:
                 
                 data_found = False
 
-                # 1. 일반/층별 현황
+                # 1. 일반/층별 현황 (상세용도 원본 텍스트 전부 표시)
                 if not df_floor.empty:
                     my_f = df_floor[df_floor['관리건축물대장PK'] == pk]
                     if not my_f.empty:
@@ -129,10 +131,17 @@ if submitted and query:
                         my_f['층'] = my_f['층번호'] + "층"
                         my_f['면적'] = my_f['면적(㎡)'] + " ㎡"
                         
+                        # 원본 '기타용도'를 자르지 않고 '상세용도'에 노출 (경기부동산포털과 동일)
                         my_f['상세용도'] = my_f['기타용도'].apply(lambda x: str(x).strip() if str(x).strip() else "-")
                         
-                        disp_df = my_f[['층', '주용도코드명', '상세용도', '면적']].copy()
-                        disp_df.columns = ['층', '주용도', '상세용도', '면적']
+                        # 숫자(N가구/N호)만 빼내는 열 추가
+                        def extract_unit(txt):
+                            m = re.search(r'(\d+)\s*(가구|호)', str(txt))
+                            return m.group(0) if m else "-"
+                        my_f['가구/호'] = my_f['기타용도'].apply(extract_unit)
+                        
+                        disp_df = my_f[['층', '주용도코드명', '상세용도', '가구/호', '면적']].copy()
+                        disp_df.columns = ['층', '주용도', '상세용도', '가구/호', '면적']
                         
                         st.write("**(일반/층별 현황)**")
                         st.table(disp_df.set_index('층'))
@@ -156,6 +165,6 @@ if submitted and query:
                         st.table(disp_df.set_index('층/호'))
 
                 if not data_found:
-                    st.write("해당 건축물의 층별 상세 정보가 다운로드한 공공데이터에 존재하지 않습니다.")
+                    st.write("해당 건축물의 층별 상세 정보가 존재하지 않습니다.")
         else:
-            st.error("검색 결과가 없습니다.")
+            st.error("검색 결과가 없습니다. 지번을 다시 확인해주세요.")
