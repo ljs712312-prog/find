@@ -8,7 +8,6 @@ import os
 # ==========================================
 st.set_page_config(page_title="원탑 건축물대장 추출기", layout="centered")
 
-# 최소한의 디자인: 순정 박스(Metric)에 테두리만 살짝 입혀서 가독성 확보
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&display=swap');
@@ -39,12 +38,11 @@ def format_date(val):
         return f"{d[:4]}년 {d[4:6]}월 {d[6:]}일"
     return d
 
-@st.cache_resource(show_spinner="데이터베이스 연결 중... (절대 튕기지 않습니다) 🚀")
+@st.cache_resource(show_spinner="데이터베이스 연결 중... 🚀")
 def load_data():
     def read_file_safely(filename):
         if not os.path.exists(filename): return pd.DataFrame()
         try:
-            # 모든 데이터를 강제로 '문자(String)'로 읽어들여 Arrow 에러 원천 차단
             df = pd.read_csv(filename, dtype=str, encoding='utf-8', on_bad_lines='skip')
         except:
             df = pd.read_csv(filename, dtype=str, encoding='cp949', on_bad_lines='skip')
@@ -58,7 +56,7 @@ def load_data():
     return master, floor, status, area
 
 # ==========================================
-# 3. 메인 앱 구동 (순정 컴포넌트 사용)
+# 3. 메인 앱 구동
 # ==========================================
 st.markdown('<h2 style="text-align:center; font-weight:900;">🏢 원탑 건축물대장</h2>', unsafe_allow_html=True)
 
@@ -93,57 +91,36 @@ if submitted and query:
                 
                 st.markdown("---")
                 
-                # 1. 주소 영역 (기본 Markdown)
                 st.subheader(f"📌 {title}")
                 st.write(f"**📍 지번:** {b.get('대지위치', '-')}")
                 st.write(f"**🛣️ 도로명:** {b.get('도로명대지위치', '정보 없음')}")
-                st.write("") # 여백
+                st.write("")
                 
-                # 2. 4대 지표 (순정 Metric - 모바일/다크모드 완벽 자동 대응)
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("층수", f"{b.get('지상층수', '0')}층")
                 c2.metric("세대/가구", f"{safe_int(b.get('가구수(가구)')) + safe_int(b.get('세대수(세대)'))}호")
                 c3.metric("주차대수", f"{safe_int(b.get('옥내자주식대수(대)')) + safe_int(b.get('옥외자주식대수(대)'))}대")
                 c4.metric("엘리베이터", f"{safe_int(b.get('승용승강기수')) + safe_int(b.get('비상용승강기수'))}대")
                 
-                # 3. 주용도 / 사용승인일 (순정 Info 박스)
                 st.write("")
                 col_a, col_b = st.columns(2)
                 col_a.info(f"**🏢 주용도:** {b.get('주용도코드명', '-')}")
                 col_b.warning(f"**📅 사용승인일:** {format_date(b.get('사용승인일', '-'))}")
                 
-                # 4. 상세 층별 표 (에러를 유발하는 Arrow를 우회하는 st.table 사용)
                 st.write("#### 📊 층별 상세 현황")
                 
-                is_jibhap = "집합" in str(b.get('대장구분코드명', ''))
-                
-                if is_jibhap and not df_status.empty and not df_area.empty:
-                    my_s = df_status[df_status['관리건축물대장PK'] == pk]
-                    my_a = df_area[df_area['관리건축물대장PK'] == pk]
-                    if not my_s.empty and not my_a.empty:
-                        merged = pd.merge(my_s, my_a, on=['관리건축물대장PK', '층번호', '호명칭'], how='inner')
-                        merged['sort'] = merged['호명칭'].apply(natural_sort)
-                        merged = merged.sort_values('sort').drop_duplicates(['층번호', '호명칭'])
-                        
-                        # 표 데이터를 이쁘게 세팅
-                        merged['층/호'] = merged['층번호'] + "층 " + merged['호명칭']
-                        merged['전용면적'] = merged['면적(㎡)'] + " ㎡"
-                        disp_df = merged[['층/호', '주용도코드명', '전용면적']].copy()
-                        disp_df.columns = ['층/호', '용도', '전용면적']
-                        
-                        # Arrow 에러를 절대 일으키지 않는 순정 정적 테이블
-                        st.table(disp_df.set_index('층/호'))
-                    else:
-                        st.write("상세 정보가 없습니다.")
-                        
-                elif not df_floor.empty:
+                # ✅ 핵심 변경점: 분류(집합/일반) 상관없이 데이터가 존재하는 파일은 전부 뒤져서 띄워줌
+                data_found = False
+
+                # 1. 층별개요 데이터가 있는지 확인하고 표출
+                if not df_floor.empty:
                     my_f = df_floor[df_floor['관리건축물대장PK'] == pk]
                     if not my_f.empty:
+                        data_found = True
                         my_f = my_f.copy()
                         my_f['sort'] = my_f['층번호'].apply(natural_sort)
                         my_f = my_f.sort_values('sort')
                         
-                        # 표 데이터를 이쁘게 세팅
                         my_f['층'] = my_f['층번호'] + "층"
                         my_f['면적'] = my_f['면적(㎡)'] + " ㎡"
                         
@@ -155,9 +132,29 @@ if submitted and query:
                         disp_df = my_f[['층', '주용도코드명', '가구/호', '면적']].copy()
                         disp_df.columns = ['층', '용도', '가구/호', '면적']
                         
-                        # Arrow 에러를 절대 일으키지 않는 순정 정적 테이블
+                        st.write("**(일반/층별 현황)**")
                         st.table(disp_df.set_index('층'))
-                    else:
-                        st.write("상세 정보가 없습니다.")
+
+                # 2. 전유부/면적 데이터가 있는지 확인하고 표출 (위에서 층별 데이터를 그렸어도, 이것도 있으면 또 그림)
+                if not df_status.empty and not df_area.empty:
+                    my_s = df_status[df_status['관리건축물대장PK'] == pk]
+                    my_a = df_area[df_area['관리건축물대장PK'] == pk]
+                    if not my_s.empty and not my_a.empty:
+                        data_found = True
+                        merged = pd.merge(my_s, my_a, on=['관리건축물대장PK', '층번호', '호명칭'], how='inner')
+                        merged['sort'] = merged['호명칭'].apply(natural_sort)
+                        merged = merged.sort_values('sort').drop_duplicates(['층번호', '호명칭'])
+                        
+                        merged['층/호'] = merged['층번호'] + "층 " + merged['호명칭']
+                        merged['전용면적'] = merged['면적(㎡)'] + " ㎡"
+                        disp_df = merged[['층/호', '주용도코드명', '전용면적']].copy()
+                        disp_df.columns = ['층/호', '용도', '전용면적']
+                        
+                        st.write("**(집합/호실별 현황)**")
+                        st.table(disp_df.set_index('층/호'))
+
+                # 3. 양쪽 다 아무 데이터도 없을 때만 없다고 표시
+                if not data_found:
+                    st.write("해당 건축물의 층별 상세 정보가 다운로드한 공공데이터에 존재하지 않습니다.")
         else:
             st.error("검색 결과가 없습니다.")
