@@ -94,6 +94,12 @@ if submitted and query:
                 st.subheader(f"📌 {title}")
                 st.write(f"**📍 지번:** {b.get('대지위치', '-')}")
                 st.write(f"**🛣️ 도로명:** {b.get('도로명대지위치', '정보 없음')}")
+                
+                # ✅ 위반건축물 팩트 체크 및 강력 경고 UI 추가
+                violation_status = str(b.get('위반건축물여부', '')).strip()
+                if violation_status in ['1', 'Y', 'y', '참', '위반', 'O']:
+                    st.error("🚨 주의: 이 건물은 **[위반건축물]**로 등록되어 있습니다! (건축물대장 원본 열람 필수)")
+                
                 st.write("")
                 
                 c1, c2, c3, c4 = st.columns(4)
@@ -123,7 +129,6 @@ if submitted and query:
                         my_f['층'] = my_f['층번호'] + "층"
                         my_f['면적'] = my_f['면적(㎡)'] + " ㎡"
                         
-                        # ✅ 핵심 수정: 텍스트를 자르지 않고 '기타용도' 원본을 그대로 '상세용도'에 노출
                         my_f['상세용도'] = my_f['기타용도'].apply(lambda x: str(x).strip() if str(x).strip() else "-")
                         
                         disp_df = my_f[['층', '주용도코드명', '상세용도', '면적']].copy()
