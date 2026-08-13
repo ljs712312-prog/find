@@ -1,9 +1,13 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 from streamlit.testing.v1 import AppTest
 
 from app import SearchOutcome
 from src.address import LandKey, ParsedAddress
+
+
+APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
 def _outcome() -> SearchOutcome:
@@ -44,7 +48,7 @@ def _outcome() -> SearchOutcome:
 
 
 def test_violation_screening_is_opt_in_and_has_official_fallback() -> None:
-    app = AppTest.from_file("app.py", default_timeout=10)
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
     app.session_state["search_outcome"] = _outcome()
     app.run()
 
@@ -70,7 +74,7 @@ def test_portal_button_is_available_when_buildinghub_returns_no_buildings() -> N
     empty_snapshot = SimpleNamespace(
         buildings=(), warnings=(), source_as_of="20260813"
     )
-    app = AppTest.from_file("app.py", default_timeout=10)
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
     app.session_state["search_outcome"] = SearchOutcome(
         parsed=outcome.parsed,
         snapshot=empty_snapshot,
