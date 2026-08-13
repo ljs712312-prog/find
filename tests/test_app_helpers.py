@@ -5,6 +5,7 @@ from app import (
     _date,
     _decimal_text,
     _friendly_api_error,
+    _metric_cards,
     _sum_int_fields,
     _unit_floor_label,
     _unit_total,
@@ -48,3 +49,24 @@ def test_unit_floor_falls_back_to_explicit_floor_number() -> None:
         exposures=(SimpleNamespace(floor_name=None, floor_number=3),)
     )
     assert _unit_floor_label(unit) == "3층"
+
+
+def test_metric_cards_split_long_floor_and_household_values() -> None:
+    building = SimpleNamespace(
+        title={
+            "indrAutoUtcnt": "2",
+            "oudrAutoUtcnt": "1",
+            "rideUseElvtCnt": "1",
+        },
+        ground_floor_count=4,
+        underground_floor_count=1,
+        household_count=0,
+        family_count=8,
+    )
+
+    assert _metric_cards(building) == (
+        ("층수", "지상 4층", "지하 1층"),
+        ("세대 · 가구", "0세대", "8가구"),
+        ("주차", "3대", None),
+        ("승강기", "1대", None),
+    )

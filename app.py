@@ -318,7 +318,9 @@ def _render_violation(parsed: ParsedAddress) -> None:
         st.warning(f"위반 여부: VWorld에서도 확인되지 않습니다{tail}. 원본 대장을 확인해 주세요.")
 
 
-def _render_metrics(building: TitleSummary) -> None:
+def _metric_cards(
+    building: TitleSummary,
+) -> tuple[tuple[str, str, str | None], ...]:
     title = building.title
     parking = _sum_int_fields(
         title,
@@ -330,16 +332,36 @@ def _render_metrics(building: TitleSummary) -> None:
         ),
     )
     elevators = _sum_int_fields(title, ("rideUseElvtCnt", "emgenUseElvtCnt"))
-    columns = st.columns(4)
-    floor_value = (
-        "확인 불가"
-        if building.ground_floor_count is None and building.underground_floor_count is None
-        else f"지상 {building.ground_floor_count or 0} / 지하 {building.underground_floor_count or 0}"
+    return (
+        (
+            "층수",
+            f"지상 {_count_text(building.ground_floor_count, '층')}",
+            f"지하 {_count_text(building.underground_floor_count, '층')}",
+        ),
+        (
+            "세대 · 가구",
+            _count_text(building.household_count, "세대"),
+            _count_text(building.family_count, "가구"),
+        ),
+        ("주차", _count_text(parking, "대"), None),
+        ("승강기", _count_text(elevators, "대"), None),
     )
-    columns[0].metric("층수", floor_value)
-    columns[1].metric("세대 / 가구", f"{_count_text(building.household_count, '세대')} / {_count_text(building.family_count, '가구')}")
-    columns[2].metric("주차", _count_text(parking, "대"))
-    columns[3].metric("승강기", _count_text(elevators, "대"))
+
+
+def _render_metrics(building: TitleSummary) -> None:
+    # Fixed-width children in a horizontal container wrap onto a new row on
+    # narrow screens.  Secondary values keep floor and household pairs clear
+    # without forcing two long strings onto a single metric line.
+    with st.container(horizontal=True, gap="small"):
+        for label, value, secondary in _metric_cards(building):
+            st.metric(
+                label,
+                value,
+                delta=secondary,
+                delta_color="off",
+                delta_arrow="off",
+                width=190,
+            )
 
 
 def _render_building(building: TitleSummary, index: int) -> None:
@@ -477,6 +499,7 @@ def render_app() -> None:
         .block-container {max-width: 920px; padding-top: 2.5rem; padding-bottom: 4rem;}
         h1 {text-align: center; letter-spacing: -0.04em;}
         div[data-testid="stMetric"] {border: 1px solid #dfe4ec; border-radius: 12px; padding: 0.8rem;}
+        div[data-testid="stMetricValue"] {white-space: normal; overflow-wrap: anywhere; line-height: 1.15;}
         div[data-testid="stFormSubmitButton"] button {min-height: 44px; font-weight: 700;}
         div[data-testid="stTextInput"] input {min-height: 44px;}
         @media (max-width: 640px) {
