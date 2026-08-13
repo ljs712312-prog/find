@@ -23,6 +23,13 @@ from src.building_hub import (
     BuildingHubQuotaError,
     BuildingHubRateLimitError,
 )
+from src.gyeonggi_portal import (
+    GyeonggiPortalClient,
+    GyeonggiPortalError,
+    PortalBuildingReference,
+    PortalBuildingState,
+    gyeonggi_portal_url,
+)
 from src.legacy import LegacyBuilding, load_legacy_frames, lookup_legacy
 from src.lookup import RegisterSnapshot, TitleSummary, UnitSummary, lookup_register
 from src.vworld import (
@@ -37,6 +44,10 @@ from src.vworld import (
 # hashes this argument into each entry, so a hot deploy cannot keep serving a
 # snapshot produced by an older register-mapping rule.
 LOOKUP_CACHE_SCHEMA = "2026-08-13.2"
+GOVERNMENT24_REGISTER_URL = (
+    "https://www.gov.kr/mw/AA020InfoCappView.do?CappBizCD=15000000098"
+)
+VIOLATION_LOOKUP_STATE_KEY = "violation_lookup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +114,18 @@ def _vworld_cached(
     del key_fingerprint
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
     return VWorldClient(_api_key, domain=domain).get_violation_reference(land_key)
+
+
+@st.cache_data(ttl=30 * 60, max_entries=256, show_spinner=False)
+def _gyeonggi_portal_cached(
+    sigungu_cd: str,
+    bjdong_cd: str,
+    plat_gb_cd: str,
+    bun: str,
+    ji: str,
+) -> PortalBuildingReference:
+    land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
+    return GyeonggiPortalClient().get_building_reference(land_key)
 
 
 def _land_args(land_key: LandKey) -> tuple[str, str, str, str, str]:
@@ -285,37 +308,126 @@ def _unit_table(building: TitleSummary) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _render_violation(parsed: ParsedAddress) -> None:
-    key = _secret("VWORLD_API_KEY")
-    if not key:
-        st.warning(
-            "위반 여부: 건축HUB 공개 API에서 확인할 수 없습니다. "
-            "VWorld 키 연동 전에는 세움터·정부24 발급 대장으로 확인해 주세요."
-        )
-        return
+def _violation_lookup_identity(parsed: ParsedAddress) -> tuple[str, ...]:
+    return _land_args(parsed.land_key)
 
-    try:
-        reference = _vworld_cached(
-            *_land_args(parsed.land_key),
-            _key_fingerprint(key),
-            _secret("VWORLD_DOMAIN"),
-            key,
-        )
-    except VWorldError:
-        st.warning("위반 여부: VWorld 참고정보를 불러오지 못했습니다. 원본 대장을 확인해 주세요.")
-        return
 
+def _render_vworld_reference(reference: ViolationReference) -> None:
     tail = f" (기준 {reference.as_of})" if reference.as_of else ""
     if reference.state is ViolationState.YES:
-        st.error(f"VWorld 참고정보: 위반건축물 표시가 있습니다{tail}. 원본 대장 확인이 필요합니다.")
+        st.error(
+            f"VWorld 참고자료상 이 필지에 위반 표시가 있습니다{tail}. "
+            "정부24 발급 대장으로 최종 확인해 주세요."
+        )
     elif reference.state is ViolationState.NO:
-        st.success(
-            f"VWorld 참고정보: 위반 표시 없음{tail}. 다만 법적 확인값은 아니므로 원본 대장을 확인해 주세요."
+        st.info(
+            f"VWorld 참고자료상 이 필지에 위반 표시가 없습니다{tail}. "
+            "적법 판정이 아니며, 현재 상태는 발급 대장으로 확인해야 합니다."
         )
     elif reference.state is ViolationState.MIXED:
-        st.warning(f"VWorld 참고정보: 같은 필지의 건물별 위반 표시가 서로 다릅니다{tail}.")
+        st.warning(
+            f"VWorld에서 같은 필지의 건물별 위반 표시가 서로 다릅니다{tail}. "
+            "조회할 건물을 구분해 원본 대장을 확인해 주세요."
+        )
     else:
-        st.warning(f"위반 여부: VWorld에서도 확인되지 않습니다{tail}. 원본 대장을 확인해 주세요.")
+        st.warning(
+            f"VWorld 참고자료에서도 위반 표시를 판독하지 못했습니다{tail}. "
+            "원본 대장을 확인해 주세요."
+        )
+
+
+def _render_portal_reference(reference: PortalBuildingReference) -> None:
+    if reference.state is PortalBuildingState.NOT_LISTED:
+        st.warning(
+            "경기부동산포털의 건축물 선택 결과가 ‘해당 사항 없음’입니다. "
+            "이 결과만으로 위반 여부를 판단할 수 없습니다. 위반·보안건축물뿐 아니라 "
+            "연계 누락·자료 없음도 똑같이 표시됩니다."
+        )
+    else:
+        st.info(
+            f"경기부동산포털에 건축물 {reference.building_count:,}건이 표시됩니다. "
+            "경기부동산포털은 2025년 9월 12일부터 위반정보를 제공하지 않으므로, "
+            "표시된다는 사실도 ‘적법’ 판정은 아닙니다."
+        )
+        if reference.building_names:
+            st.caption("포털 표시: " + " · ".join(reference.building_names[:5]))
+
+
+def _render_violation(parsed: ParsedAddress) -> None:
+    """Render opt-in screening; never make a certified violation decision."""
+
+    identity = _violation_lookup_identity(parsed)
+    current = st.session_state.get(VIOLATION_LOOKUP_STATE_KEY)
+    if not isinstance(current, dict) or current.get("identity") != identity:
+        current = {"identity": identity}
+
+    st.markdown("### 위반건축물 참고 확인")
+    st.caption(
+        "아래 조회는 자동 실행되지 않습니다. 경기포털 결과와 VWorld 값은 모두 "
+        "1차 확인용이며, 최종 판단은 정부24·세움터 발급 건축물대장으로 해야 합니다."
+    )
+
+    portal_clicked = False
+    vworld_clicked = False
+    vworld_key = _secret("VWORLD_API_KEY")
+    with st.container(horizontal=True, gap="small"):
+        portal_clicked = st.button(
+            "경기부동산포털 1차 확인",
+            key=f"portal-check-{'-'.join(identity)}",
+            help="포털의 건축물 표시 여부만 확인합니다. 위반 여부 확정 기능이 아닙니다.",
+        )
+        if vworld_key:
+            vworld_clicked = st.button(
+                "VWorld 위반표시 참고조회",
+                key=f"vworld-check-{'-'.join(identity)}",
+            )
+        st.link_button(
+            "경기포털에서 직접 보기",
+            gyeonggi_portal_url(parsed.land_key),
+        )
+        st.link_button("정부24 대장 열람", GOVERNMENT24_REGISTER_URL)
+
+    if portal_clicked:
+        current.pop("portal_error", None)
+        try:
+            with st.spinner("경기부동산포털의 건축물 표시 여부를 확인하고 있습니다…"):
+                current["portal"] = _gyeonggi_portal_cached(*identity)
+        except GyeonggiPortalError:
+            current.pop("portal", None)
+            current["portal_error"] = True
+        st.session_state[VIOLATION_LOOKUP_STATE_KEY] = current
+
+    if vworld_clicked and vworld_key:
+        current.pop("vworld_error", None)
+        try:
+            with st.spinner("VWorld의 위반 표시 참고자료를 확인하고 있습니다…"):
+                current["vworld"] = _vworld_cached(
+                    *identity,
+                    _key_fingerprint(vworld_key),
+                    _secret("VWORLD_DOMAIN"),
+                    vworld_key,
+                )
+        except VWorldError:
+            current.pop("vworld", None)
+            current["vworld_error"] = True
+        st.session_state[VIOLATION_LOOKUP_STATE_KEY] = current
+
+    if current.get("portal_error"):
+        st.warning(
+            "경기부동산포털의 참고결과를 불러오지 못했습니다. "
+            "‘경기포털에서 직접 보기’로 확인해 주세요."
+        )
+    portal_reference = current.get("portal")
+    if isinstance(portal_reference, PortalBuildingReference):
+        _render_portal_reference(portal_reference)
+
+    if current.get("vworld_error"):
+        st.warning(
+            "VWorld 참고정보를 불러오지 못했습니다. 원본 대장을 확인해 주세요."
+        )
+    vworld_reference = current.get("vworld")
+    if isinstance(vworld_reference, ViolationReference):
+        _render_vworld_reference(vworld_reference)
 
 
 def _metric_cards(
@@ -428,6 +540,7 @@ def _render_api(outcome: SearchOutcome) -> None:
     snapshot = outcome.snapshot
     if not snapshot.buildings:
         st.error("공식 API 조회 결과가 없습니다. 지번과 산번지 여부를 확인해 주세요.")
+        _render_violation(outcome.parsed)
         return
 
     st.success(f"공식 건축HUB에서 건축물 {len(snapshot.buildings)}건을 확인했습니다.")
@@ -476,6 +589,7 @@ def _render_legacy(outcome: SearchOutcome) -> None:
         f"{outcome.api_error} 기존 수원 CSV 스냅샷의 요약·층별 정보만 임시로 표시합니다. "
         "호실면적과 위반 여부는 표시하지 않습니다."
     )
+    _render_violation(outcome.parsed)
     for index, building in enumerate(outcome.legacy):
         _render_legacy_building(building, index)
 
@@ -501,6 +615,7 @@ def render_app() -> None:
         div[data-testid="stMetric"] {border: 1px solid #dfe4ec; border-radius: 12px; padding: 0.8rem;}
         div[data-testid="stMetricValue"] {white-space: normal; overflow-wrap: anywhere; line-height: 1.15;}
         div[data-testid="stFormSubmitButton"] button {min-height: 44px; font-weight: 700;}
+        div[data-testid="stButton"] button, div[data-testid="stLinkButton"] a {min-height: 44px;}
         div[data-testid="stTextInput"] input {min-height: 44px;}
         @media (max-width: 640px) {
           .block-container {padding-left: 1rem; padding-right: 1rem; padding-top: 1.5rem;}
@@ -525,6 +640,7 @@ def render_app() -> None:
         # Clear the previous result before validation/network work so stale data
         # can never remain paired with a new or empty query.
         st.session_state.pop("search_outcome", None)
+        st.session_state.pop(VIOLATION_LOOKUP_STATE_KEY, None)
         if not query.strip():
             st.error("지번 주소를 입력해 주세요.")
         else:
@@ -548,6 +664,7 @@ def render_app() -> None:
             f"{outcome.api_error or '조회에 실패했습니다.'} "
             "보조 스냅샷에도 해당 지번이 없습니다."
         )
+        _render_violation(outcome.parsed)
 
     with st.expander("데이터 출처와 확인 범위"):
         st.write(

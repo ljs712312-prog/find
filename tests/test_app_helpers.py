@@ -9,7 +9,9 @@ from app import (
     _sum_int_fields,
     _unit_floor_label,
     _unit_total,
+    _violation_lookup_identity,
 )
+from src.address import parse_address
 from src.building_hub import BuildingHubAPIError, BuildingHubAuthError
 
 
@@ -70,3 +72,10 @@ def test_metric_cards_split_long_floor_and_household_values() -> None:
         ("주차", "3대", None),
         ("승강기", "1대", None),
     )
+
+
+def test_violation_lookup_identity_changes_with_lot() -> None:
+    first = parse_address("망포동 6-11")
+    second = parse_address("망포동 6-12")
+
+    assert _violation_lookup_identity(first) != _violation_lookup_identity(second)
