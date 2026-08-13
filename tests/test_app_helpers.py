@@ -1,6 +1,14 @@
 from decimal import Decimal
+from types import SimpleNamespace
 
-from app import _date, _decimal_text, _friendly_api_error, _sum_int_fields
+from app import (
+    _date,
+    _decimal_text,
+    _friendly_api_error,
+    _sum_int_fields,
+    _unit_floor_label,
+    _unit_total,
+)
 from src.building_hub import BuildingHubAPIError, BuildingHubAuthError
 
 
@@ -28,3 +36,15 @@ def test_api_errors_are_user_friendly_without_raw_key_message() -> None:
     assert "secret" not in _friendly_api_error(auth)
     assert "secret" not in _friendly_api_error(generic)
     assert "동기화" in _friendly_api_error(generic)
+
+
+def test_unit_total_does_not_treat_missing_common_area_as_zero() -> None:
+    assert _unit_total(SimpleNamespace(exclusive_area=Decimal("42.17"), common_area=None)) is None
+    assert _unit_total(SimpleNamespace(exclusive_area=Decimal("42.17"), common_area=Decimal("0"))) == Decimal("42.17")
+
+
+def test_unit_floor_falls_back_to_explicit_floor_number() -> None:
+    unit = SimpleNamespace(
+        exposures=(SimpleNamespace(floor_name=None, floor_number=3),)
+    )
+    assert _unit_floor_label(unit) == "3층"

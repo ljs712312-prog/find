@@ -170,10 +170,22 @@ class UnitSummary:
 
     @property
     def purposes(self) -> tuple[str, ...]:
-        """Return distinct, explicitly supplied purpose labels."""
+        """Return distinct unit-use labels, preferring exclusive components.
 
+        Common-area labels such as stairs or pump rooms describe shared
+        components, not the use of the unit itself.  They stay available in
+        ``area_components`` but are omitted from this concise UI property when
+        at least one exclusive-purpose component exists.
+        """
+
+        exclusive = tuple(
+            component
+            for component in self.area_components
+            if component.category is AreaCategory.EXCLUSIVE
+        )
+        components = exclusive or self.area_components
         labels: list[str] = []
-        for component in self.area_components:
+        for component in components:
             label = component.other_purpose or component.purpose_name
             if label and label not in labels:
                 labels.append(label)

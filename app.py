@@ -211,12 +211,26 @@ def _natural_key(value: Any) -> tuple[Any, ...]:
 
 
 def _unit_total(unit: UnitSummary) -> Decimal | None:
-    values = [
-        value
-        for value in (unit.exclusive_area, unit.common_area)
-        if value is not None
-    ]
-    return sum(values, Decimal("0")) if values else None
+    # A missing common/exclusive section is unknown, not an implicit zero.
+    if unit.exclusive_area is None or unit.common_area is None:
+        return None
+    return unit.exclusive_area + unit.common_area
+
+
+def _unit_floor_label(unit: UnitSummary) -> str:
+    names = tuple(
+        dict.fromkeys(item.floor_name for item in unit.exposures if item.floor_name)
+    )
+    if len(names) == 1:
+        return names[0]
+    numbers = tuple(
+        dict.fromkeys(
+            item.floor_number
+            for item in unit.exposures
+            if item.floor_number is not None
+        )
+    )
+    return f"{numbers[0]}층" if len(numbers) == 1 else "-"
 
 
 def _floor_table(building: TitleSummary) -> pd.DataFrame:
@@ -244,7 +258,7 @@ def _unit_table(building: TitleSummary) -> pd.DataFrame:
     rows = [
         {
             "동": unit.dong_name or building.dong_name or "-",
-            "층": unit.floor_name or "-",
+            "층": _unit_floor_label(unit),
             "호": unit.ho_name or "-",
             "전유면적(㎡)": _decimal_text(unit.exclusive_area, suffix="").strip(),
             "공용면적(㎡)": _decimal_text(unit.common_area, suffix="").strip(),
@@ -321,14 +335,14 @@ def _render_metrics(building: TitleSummary) -> None:
 
 
 def _render_building(building: TitleSummary, index: int) -> None:
-    label = " ".join(
-        part
-        for part in (
-            building.building_name,
-            building.dong_name,
+    label_parts = tuple(
+        dict.fromkeys(
+            part
+            for part in (building.building_name, building.dong_name)
+            if part
         )
-        if part
-    ) or f"{building.register_group} 건축물 {index + 1}"
+    )
+    label = " ".join(label_parts) or f"{building.register_group} 건축물 {index + 1}"
 
     with st.container(border=True):
         st.subheader(f"{label} · {building.register_group}")
@@ -389,7 +403,7 @@ def _render_api(outcome: SearchOutcome) -> None:
     st.success(f"공식 건축HUB에서 건축물 {len(snapshot.buildings)}건을 확인했습니다.")
     st.caption(
         f"정규화 주소: {outcome.parsed.canonical_address} · "
-        f"API 자료 생성일: {_date(snapshot.source_as_of)} · 월간 갱신 자료"
+        f"대장 레코드 생성일: {_date(snapshot.source_as_of)} · 월간 갱신 API"
     )
     _render_violation(outcome.parsed)
     for index, building in enumerate(snapshot.buildings):

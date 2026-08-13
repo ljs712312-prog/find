@@ -189,6 +189,7 @@ def test_collective_unit_uses_pk_graph_and_exact_area_join() -> None:
     ]
     assert {item.other_purpose for item in exclusive_components} == {"주거", "발코니"}
     assert sum((item.area or Decimal("0")) for item in exclusive_components) == Decimal("50.00")
+    assert unit.purposes == ("주거", "발코니")
     assert any("전유부 관리 PK가 없는 전유공용면적 1개" in warning for warning in result.warnings)
 
 
