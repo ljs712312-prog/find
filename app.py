@@ -1,170 +1,519 @@
-import streamlit as st
-import pandas as pd
+"""Streamlit UI for the official BuildingHUB-based register lookup."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+import hashlib
 import re
-import os
+from typing import Any, Iterable, Mapping
 
-# ==========================================
-# 1. 기본 설정 (가장 안전한 순정 레이아웃)
-# ==========================================
-st.set_page_config(page_title="원탑 건축물대장 추출기", layout="centered")
+import pandas as pd
+import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&display=swap');
-    html, body, [class*="css"] { font-family: 'Noto Sans KR', sans-serif !important; }
-    /* 핵심 정보 4분할 박스 예쁘게 선 긋기 */
-    div[data-testid="metric-container"] {
-        border: 2px solid #e5e7eb; padding: 15px; border-radius: 12px; text-align: center;
-        background-color: transparent;
-    }
-</style>
-""", unsafe_allow_html=True)
+from src.address import AddressParseError, LandKey, ParsedAddress, parse_address
+from src.building_hub import (
+    BuildingHubAPIError,
+    BuildingHubAuthError,
+    BuildingHubClient,
+    BuildingHubError,
+    BuildingHubHTTPError,
+    BuildingHubNetworkError,
+    BuildingHubQuotaError,
+    BuildingHubRateLimitError,
+)
+from src.legacy import LegacyBuilding, load_legacy_frames, lookup_legacy
+from src.lookup import RegisterSnapshot, TitleSummary, UnitSummary, lookup_register
+from src.vworld import (
+    ViolationReference,
+    ViolationState,
+    VWorldClient,
+    VWorldError,
+)
 
-# ==========================================
-# 2. 에러 원천 차단 데이터 로직
-# ==========================================
-def safe_int(val):
-    try: return int(re.sub(r'[^0-9]', '', str(val)))
-    except: return 0
 
-def clean_txt(c):
-    return re.sub(r'[^a-zA-Z0-9가-힣()㎡]', '', str(c)).strip()
+@dataclass(frozen=True, slots=True)
+class SearchOutcome:
+    parsed: ParsedAddress
+    snapshot: RegisterSnapshot | None = None
+    legacy: tuple[LegacyBuilding, ...] = ()
+    api_error: str | None = None
+    used_legacy: bool = False
 
-def natural_sort(s):
-    return [int(t) if t.isdigit() else t.lower() for t in re.split('([0-9]+)', str(s))]
 
-def format_date(val):
-    d = str(val).strip()
-    if len(d) == 8 and d.isdigit():
-        return f"{d[:4]}년 {d[4:6]}월 {d[6:]}일"
-    return d
+def _secret(name: str) -> str | None:
+    """Read an optional Streamlit secret without leaking or requiring a file."""
 
-@st.cache_resource(show_spinner="데이터베이스 연결 중... 🚀")
-def load_data():
-    def read_file_safely(filename):
-        if not os.path.exists(filename): return pd.DataFrame()
+    try:
+        value = st.secrets.get(name)
+    except (StreamlitSecretNotFoundError, FileNotFoundError, KeyError):
+        return None
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _key_fingerprint(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+@st.cache_data(ttl=6 * 60 * 60, max_entries=256, show_spinner=False)
+def _lookup_api_cached(
+    sigungu_cd: str,
+    bjdong_cd: str,
+    plat_gb_cd: str,
+    bun: str,
+    ji: str,
+    key_fingerprint: str,
+    _service_key: str,
+) -> RegisterSnapshot:
+    # ``key_fingerprint`` invalidates old cached responses after key rotation;
+    # the actual secret is excluded from Streamlit's cache key and never logged.
+    del key_fingerprint
+    land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
+    with BuildingHubClient(_service_key) as client:
+        return lookup_register(client, land_key)
+
+
+@st.cache_data(show_spinner=False)
+def _legacy_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
+    return load_legacy_frames()
+
+
+@st.cache_data(ttl=60 * 60, max_entries=256, show_spinner=False)
+def _vworld_cached(
+    sigungu_cd: str,
+    bjdong_cd: str,
+    plat_gb_cd: str,
+    bun: str,
+    ji: str,
+    key_fingerprint: str,
+    domain: str | None,
+    _api_key: str,
+) -> ViolationReference:
+    del key_fingerprint
+    land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
+    return VWorldClient(_api_key, domain=domain).get_violation_reference(land_key)
+
+
+def _land_args(land_key: LandKey) -> tuple[str, str, str, str, str]:
+    return (
+        land_key.sigungu_cd,
+        land_key.bjdong_cd,
+        land_key.plat_gb_cd,
+        land_key.bun,
+        land_key.ji,
+    )
+
+
+def _friendly_api_error(error: BuildingHubError) -> str:
+    if isinstance(error, BuildingHubAuthError):
+        return "건축HUB 인증키가 아직 동기화되지 않았거나 사용 권한이 없습니다."
+    if isinstance(error, BuildingHubQuotaError):
+        return "오늘의 건축HUB API 호출 한도를 모두 사용했습니다."
+    if isinstance(error, BuildingHubRateLimitError):
+        return "건축HUB 요청이 잠시 몰렸습니다. 잠시 후 다시 조회해 주세요."
+    if isinstance(error, BuildingHubNetworkError):
+        return "건축HUB 서버에 연결하지 못했습니다."
+    if isinstance(error, BuildingHubHTTPError):
+        return f"건축HUB가 HTTP {error.status_code} 오류로 응답했습니다."
+    if isinstance(error, BuildingHubAPIError):
+        if error.result_code == "10":
+            return "건축HUB가 요청 파라미터 오류를 반환했습니다. 인증키 승인 동기화를 확인해 주세요."
+        return f"건축HUB 오류가 발생했습니다. (코드 {error.result_code})"
+    return "건축HUB 응답을 처리하지 못했습니다."
+
+
+def _search(query: str, service_key: str | None) -> SearchOutcome:
+    parsed = parse_address(query)
+    if service_key:
         try:
-            df = pd.read_csv(filename, dtype=str, encoding='utf-8', on_bad_lines='skip')
-        except:
-            df = pd.read_csv(filename, dtype=str, encoding='cp949', on_bad_lines='skip')
-        df.columns = [clean_txt(c) for c in df.columns]
-        # 모든 데이터를 순수 문자로 강제 변환하여 화면 튕김 방지
-        return df.fillna("").astype(str)
-
-    master = read_file_safely("suwon_building_master.csv.gz")
-    floor = read_file_safely("suwon_floor_info.csv.gz")
-    status = read_file_safely("suwon_unit_status.csv.gz")
-    area = read_file_safely("suwon_unit_area.csv.gz")
-    return master, floor, status, area
-
-# ==========================================
-# 3. 메인 앱 구동
-# ==========================================
-st.markdown('<h2 style="text-align:center; font-weight:900;">🏢 원탑 건축물대장</h2>', unsafe_allow_html=True)
-
-df_master, df_floor, df_status, df_area = load_data()
-
-with st.form("search_form"):
-    query = st.text_input("📍 지번 입력", placeholder="주소를 입력하세요 (예: 망포동 6-11)")
-    submitted = st.form_submit_button("🔍 정보 확인하기")
-
-if submitted and query:
-    if df_master.empty:
-        st.error("데이터 파일을 찾을 수 없습니다. (data_compressor.py를 먼저 실행해주세요)")
-    else:
-        nums = re.findall(r'\d+', query)
-        q_main, q_sub = (safe_int(nums[0]) if nums else -1), (safe_int(nums[1]) if len(nums) > 1 else 0)
-        q_dong = re.sub(r'[0-9-\s]', '', query).replace("산", "").strip()
-
-        df_master['안전_번'] = df_master.get('번', pd.Series(dtype=str)).apply(safe_int)
-        df_master['안전_지'] = df_master.get('지', pd.Series(dtype=str)).apply(safe_int)
-        mask = (df_master['안전_번'] == q_main) & (df_master['안전_지'] == q_sub)
-        if q_dong:
-            mask &= df_master['대지위치'].str.contains(q_dong, na=False)
-            
-        items = df_master[mask].to_dict('records')
-
-        if items:
-            st.success(f"✅ {len(items)}건의 건축물 정보를 성공적으로 불러왔습니다.")
-            
-            for b in items:
-                pk = b.get('관리건축물대장PK', '')
-                title = f"{b.get('건물명', '')} {b.get('동명칭', '')}".strip() or "일반 건축물"
-                
-                st.markdown("---")
-                
-                st.subheader(f"📌 {title}")
-                st.write(f"**📍 지번:** {b.get('대지위치', '-')}")
-                st.write(f"**🛣️ 도로명:** {b.get('도로명대지위치', '정보 없음')}")
-                
-                # 🔥 위반건축물 경고창 표출 로직
-                violation_status = str(b.get('위반건축물여부', '')).strip()
-                if violation_status and violation_status not in ['0', 'N', 'n', '거짓', '무', 'nan', 'None', 'NaN', '']:
-                    st.error("🚨 주의: 이 건축물은 **[위반건축물]**로 등록되어 있습니다! (건축물대장 원본 열람 필수)")
-                
-                st.write("")
-                
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("층수", f"{b.get('지상층수', '0')}층")
-                c2.metric("세대/가구", f"{safe_int(b.get('가구수(가구)')) + safe_int(b.get('세대수(세대)'))}호")
-                c3.metric("주차대수", f"{safe_int(b.get('옥내자주식대수(대)')) + safe_int(b.get('옥외자주식대수(대)'))}대")
-                c4.metric("엘리베이터", f"{safe_int(b.get('승용승강기수')) + safe_int(b.get('비상용승강기수'))}대")
-                
-                st.write("")
-                col_a, col_b = st.columns(2)
-                col_a.info(f"**🏢 주용도:** {b.get('주용도코드명', '-')}")
-                col_b.warning(f"**📅 사용승인일:** {format_date(b.get('사용승인일', '-'))}")
-                
-                st.write("#### 📊 층별 상세 현황")
-                
-                data_found = False
-
-                # 1. 일반/층별 현황 (상세용도 원본 텍스트 전부 표시)
-                if not df_floor.empty:
-                    my_f = df_floor[df_floor['관리건축물대장PK'] == pk]
-                    if not my_f.empty:
-                        data_found = True
-                        my_f = my_f.copy()
-                        my_f['sort'] = my_f['층번호'].apply(natural_sort)
-                        my_f = my_f.sort_values('sort')
-                        
-                        my_f['층'] = my_f['층번호'] + "층"
-                        my_f['면적'] = my_f['면적(㎡)'] + " ㎡"
-                        
-                        # 원본 '기타용도'를 자르지 않고 '상세용도'에 노출 (경기부동산포털과 동일)
-                        my_f['상세용도'] = my_f['기타용도'].apply(lambda x: str(x).strip() if str(x).strip() else "-")
-                        
-                        # 숫자(N가구/N호)만 빼내는 열 추가
-                        def extract_unit(txt):
-                            m = re.search(r'(\d+)\s*(가구|호)', str(txt))
-                            return m.group(0) if m else "-"
-                        my_f['가구/호'] = my_f['기타용도'].apply(extract_unit)
-                        
-                        disp_df = my_f[['층', '주용도코드명', '상세용도', '가구/호', '면적']].copy()
-                        disp_df.columns = ['층', '주용도', '상세용도', '가구/호', '면적']
-                        
-                        st.write("**(일반/층별 현황)**")
-                        st.table(disp_df.set_index('층'))
-
-                # 2. 집합/호실별 현황
-                if not df_status.empty and not df_area.empty:
-                    my_s = df_status[df_status['관리건축물대장PK'] == pk]
-                    my_a = df_area[df_area['관리건축물대장PK'] == pk]
-                    if not my_s.empty and not my_a.empty:
-                        data_found = True
-                        merged = pd.merge(my_s, my_a, on=['관리건축물대장PK', '층번호', '호명칭'], how='inner')
-                        merged['sort'] = merged['호명칭'].apply(natural_sort)
-                        merged = merged.sort_values('sort').drop_duplicates(['층번호', '호명칭'])
-                        
-                        merged['층/호'] = merged['층번호'] + "층 " + merged['호명칭']
-                        merged['전용면적'] = merged['면적(㎡)'] + " ㎡"
-                        disp_df = merged[['층/호', '주용도코드명', '전용면적']].copy()
-                        disp_df.columns = ['층/호', '용도', '전용면적']
-                        
-                        st.write("**(집합/호실별 현황)**")
-                        st.table(disp_df.set_index('층/호'))
-
-                if not data_found:
-                    st.write("해당 건축물의 층별 상세 정보가 존재하지 않습니다.")
+            snapshot = _lookup_api_cached(
+                *_land_args(parsed.land_key),
+                _key_fingerprint(service_key),
+                service_key,
+            )
+        except BuildingHubError as error:
+            api_error = _friendly_api_error(error)
         else:
-            st.error("검색 결과가 없습니다. 지번을 다시 확인해주세요.")
+            return SearchOutcome(parsed=parsed, snapshot=snapshot)
+    else:
+        api_error = "배포 설정에 건축HUB API 키가 없습니다."
+
+    master, floors = _legacy_frames()
+    legacy = lookup_legacy(parsed, master, floors)
+    return SearchOutcome(
+        parsed=parsed,
+        legacy=legacy,
+        api_error=api_error,
+        used_legacy=bool(legacy),
+    )
+
+
+def _text(value: Any, fallback: str = "-") -> str:
+    if value is None:
+        return fallback
+    result = str(value).strip()
+    return result if result else fallback
+
+
+def _date(value: Any) -> str:
+    text = _text(value)
+    if text == "-":
+        return text
+    digits = re.sub(r"\D", "", text)
+    if len(digits) == 8:
+        return f"{digits[:4]}.{digits[4:6]}.{digits[6:]}"
+    if len(digits) == 6:
+        return f"{digits[:4]}.{digits[4:6]}"
+    if len(digits) == 4:
+        return digits
+    return text
+
+
+def _decimal_text(value: Decimal | Any, *, suffix: str = "㎡") -> str:
+    if value is None or str(value).strip() == "":
+        return "-"
+    try:
+        number = Decimal(str(value))
+    except Exception:  # presentation helper: preserve a non-numeric source value
+        return _text(value)
+    formatted = format(number.normalize(), "f")
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return f"{formatted} {suffix}".strip()
+
+
+def _count_text(value: int | None, unit: str) -> str:
+    return "확인 불가" if value is None else f"{value:,}{unit}"
+
+
+def _sum_int_fields(row: Mapping[str, Any], fields: Iterable[str]) -> int | None:
+    values: list[int] = []
+    for field in fields:
+        raw = row.get(field)
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            values.append(int(Decimal(str(raw))))
+        except Exception:
+            continue
+    return sum(values) if values else None
+
+
+def _natural_key(value: Any) -> tuple[Any, ...]:
+    return tuple(
+        int(part) if part.isdigit() else part.casefold()
+        for part in re.split(r"(\d+)", _text(value, ""))
+    )
+
+
+def _unit_total(unit: UnitSummary) -> Decimal | None:
+    values = [
+        value
+        for value in (unit.exclusive_area, unit.common_area)
+        if value is not None
+    ]
+    return sum(values, Decimal("0")) if values else None
+
+
+def _floor_table(building: TitleSummary) -> pd.DataFrame:
+    rows = [
+        {
+            "층": floor.floor_name
+            or (
+                f"{floor.floor_number}층"
+                if floor.floor_number is not None
+                else floor.floor_group_name
+            )
+            or "-",
+            "주용도": floor.purpose_name or "-",
+            "상세용도": floor.other_purpose or "-",
+            "구조": floor.structure_name or "-",
+            "면적(㎡)": _decimal_text(floor.area, suffix="").strip(),
+        }
+        for floor in building.floors
+    ]
+    rows.sort(key=lambda item: _natural_key(item["층"]))
+    return pd.DataFrame(rows)
+
+
+def _unit_table(building: TitleSummary) -> pd.DataFrame:
+    rows = [
+        {
+            "동": unit.dong_name or building.dong_name or "-",
+            "층": unit.floor_name or "-",
+            "호": unit.ho_name or "-",
+            "전유면적(㎡)": _decimal_text(unit.exclusive_area, suffix="").strip(),
+            "공용면적(㎡)": _decimal_text(unit.common_area, suffix="").strip(),
+            "전유+공용(㎡)": _decimal_text(_unit_total(unit), suffix="").strip(),
+            "용도": ", ".join(unit.purposes) or "-",
+        }
+        for unit in building.units
+    ]
+    rows.sort(
+        key=lambda item: (
+            _natural_key(item["동"]),
+            _natural_key(item["층"]),
+            _natural_key(item["호"]),
+        )
+    )
+    return pd.DataFrame(rows)
+
+
+def _render_violation(parsed: ParsedAddress) -> None:
+    key = _secret("VWORLD_API_KEY")
+    if not key:
+        st.warning(
+            "위반 여부: 건축HUB 공개 API에서 확인할 수 없습니다. "
+            "VWorld 키 연동 전에는 세움터·정부24 발급 대장으로 확인해 주세요."
+        )
+        return
+
+    try:
+        reference = _vworld_cached(
+            *_land_args(parsed.land_key),
+            _key_fingerprint(key),
+            _secret("VWORLD_DOMAIN"),
+            key,
+        )
+    except VWorldError:
+        st.warning("위반 여부: VWorld 참고정보를 불러오지 못했습니다. 원본 대장을 확인해 주세요.")
+        return
+
+    tail = f" (기준 {reference.as_of})" if reference.as_of else ""
+    if reference.state is ViolationState.YES:
+        st.error(f"VWorld 참고정보: 위반건축물 표시가 있습니다{tail}. 원본 대장 확인이 필요합니다.")
+    elif reference.state is ViolationState.NO:
+        st.success(
+            f"VWorld 참고정보: 위반 표시 없음{tail}. 다만 법적 확인값은 아니므로 원본 대장을 확인해 주세요."
+        )
+    elif reference.state is ViolationState.MIXED:
+        st.warning(f"VWorld 참고정보: 같은 필지의 건물별 위반 표시가 서로 다릅니다{tail}.")
+    else:
+        st.warning(f"위반 여부: VWorld에서도 확인되지 않습니다{tail}. 원본 대장을 확인해 주세요.")
+
+
+def _render_metrics(building: TitleSummary) -> None:
+    title = building.title
+    parking = _sum_int_fields(
+        title,
+        (
+            "indrAutoUtcnt",
+            "oudrAutoUtcnt",
+            "indrMechUtcnt",
+            "oudrMechUtcnt",
+        ),
+    )
+    elevators = _sum_int_fields(title, ("rideUseElvtCnt", "emgenUseElvtCnt"))
+    columns = st.columns(4)
+    floor_value = (
+        "확인 불가"
+        if building.ground_floor_count is None and building.underground_floor_count is None
+        else f"지상 {building.ground_floor_count or 0} / 지하 {building.underground_floor_count or 0}"
+    )
+    columns[0].metric("층수", floor_value)
+    columns[1].metric("세대 / 가구", f"{_count_text(building.household_count, '세대')} / {_count_text(building.family_count, '가구')}")
+    columns[2].metric("주차", _count_text(parking, "대"))
+    columns[3].metric("승강기", _count_text(elevators, "대"))
+
+
+def _render_building(building: TitleSummary, index: int) -> None:
+    label = " ".join(
+        part
+        for part in (
+            building.building_name,
+            building.dong_name,
+        )
+        if part
+    ) or f"{building.register_group} 건축물 {index + 1}"
+
+    with st.container(border=True):
+        st.subheader(f"{label} · {building.register_group}")
+        st.write(f"**지번**  {building.lot_address or '-'}")
+        st.write(f"**도로명**  {building.road_address or '정보 없음'}")
+        _render_metrics(building)
+
+        left, right = st.columns(2)
+        left.info(f"**주용도**  {building.purpose_name or '-'}")
+        right.info(f"**사용승인일**  {_date(building.approval_date)}")
+        details = [
+            ("상세용도", building.other_purpose),
+            ("구조", building.structure_name),
+            ("대지면적", _decimal_text(building.site_area)),
+            ("건축면적", _decimal_text(building.building_area)),
+            ("연면적", _decimal_text(building.total_area)),
+        ]
+        st.caption(" · ".join(f"{name}: {_text(value)}" for name, value in details))
+
+        if building.floors:
+            st.markdown("#### 층별 현황")
+            st.dataframe(
+                _floor_table(building),
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.info("이 건축물의 층별개요가 공개 API에 없습니다.")
+
+        if building.units:
+            heading = "집합건물 호실별 면적" if building.is_collective else "API가 명시적으로 반환한 호별 정보"
+            st.markdown(f"#### {heading}")
+            st.dataframe(
+                _unit_table(building),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.caption(
+                "전유·공용 면적은 호실 관리 PK가 같은 모든 면적 행을 구분해 합산했습니다. "
+                "‘전유+공용’은 앱의 참고 계산값입니다."
+            )
+        elif building.is_collective:
+            st.warning("집합건물이지만 공개 API에서 이 표제부에 연결되는 전유부를 확인하지 못했습니다.")
+        elif building.is_multi_family_house:
+            st.warning(
+                "다가구주택 호(가구)별 면적대장(별지 제9호)은 현재 건축HUB 공개 API가 제공하지 않습니다. "
+                "층 면적을 가구 수로 나누어 추정하지 않았습니다."
+            )
+
+
+def _render_api(outcome: SearchOutcome) -> None:
+    assert outcome.snapshot is not None
+    snapshot = outcome.snapshot
+    if not snapshot.buildings:
+        st.error("공식 API 조회 결과가 없습니다. 지번과 산번지 여부를 확인해 주세요.")
+        return
+
+    st.success(f"공식 건축HUB에서 건축물 {len(snapshot.buildings)}건을 확인했습니다.")
+    st.caption(
+        f"정규화 주소: {outcome.parsed.canonical_address} · "
+        f"API 자료 생성일: {_date(snapshot.source_as_of)} · 월간 갱신 자료"
+    )
+    _render_violation(outcome.parsed)
+    for index, building in enumerate(snapshot.buildings):
+        _render_building(building, index)
+
+    if snapshot.warnings:
+        with st.expander("데이터 연결 주의사항"):
+            for warning in snapshot.warnings:
+                st.write(f"- {warning}")
+
+
+def _render_legacy_building(building: LegacyBuilding, index: int) -> None:
+    row = building.title
+    label = " ".join(
+        part for part in (row.get("건물명"), row.get("동명칭")) if _text(part, "")
+    ) or f"스냅샷 건축물 {index + 1}"
+    with st.container(border=True):
+        st.subheader(label)
+        st.write(f"**지번**  {_text(row.get('대지위치'))}")
+        st.write(f"**도로명**  {_text(row.get('도로명대지위치'), '정보 없음')}")
+        left, right = st.columns(2)
+        left.info(f"**주용도**  {_text(row.get('주용도코드명'))}")
+        right.info(f"**사용승인일**  {_date(row.get('사용승인일'))}")
+        if building.floors:
+            data = [
+                {
+                    "층": f"{_text(item.get('층번호'))}층",
+                    "주용도": _text(item.get("주용도코드명")),
+                    "상세용도": _text(item.get("기타용도")),
+                    "면적(㎡)": _text(item.get("면적(㎡)")),
+                }
+                for item in building.floors
+            ]
+            data.sort(key=lambda item: _natural_key(item["층"]))
+            st.dataframe(pd.DataFrame(data), hide_index=True, use_container_width=True)
+
+
+def _render_legacy(outcome: SearchOutcome) -> None:
+    st.warning(
+        f"{outcome.api_error} 기존 수원 CSV 스냅샷의 요약·층별 정보만 임시로 표시합니다. "
+        "호실면적과 위반 여부는 표시하지 않습니다."
+    )
+    for index, building in enumerate(outcome.legacy):
+        _render_legacy_building(building, index)
+
+
+def _render_intro() -> None:
+    st.info(
+        "수원시 법정동 지번을 입력하세요. 산번지는 ‘산’을 포함해야 합니다.  "
+        "예: `망포동 6-11`, `오목천동 산1-5`, `매산로1가 1-4`"
+    )
+
+
+def render_app() -> None:
+    st.set_page_config(
+        page_title="원탑 건축물대장",
+        page_icon="🏢",
+        layout="centered",
+    )
+    st.markdown(
+        """
+        <style>
+        .block-container {max-width: 920px; padding-top: 2.5rem; padding-bottom: 4rem;}
+        h1 {text-align: center; letter-spacing: -0.04em;}
+        div[data-testid="stMetric"] {border: 1px solid #dfe4ec; border-radius: 12px; padding: 0.8rem;}
+        div[data-testid="stFormSubmitButton"] button {min-height: 44px; font-weight: 700;}
+        div[data-testid="stTextInput"] input {min-height: 44px;}
+        @media (max-width: 640px) {
+          .block-container {padding-left: 1rem; padding-right: 1rem; padding-top: 1.5rem;}
+          h1 {font-size: 1.85rem !important;}
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.title("🏢 원탑 건축물대장")
+    st.caption("국토교통부 건축HUB 공식 API 기반 · 수원시 지번 조회")
+
+    with st.form("search_form", clear_on_submit=False):
+        query = st.text_input(
+            "지번 주소",
+            placeholder="예: 망포동 6-11 / 오목천동 산1-5",
+            help="현재 수원시 법정동 지번을 지원합니다.",
+        )
+        submitted = st.form_submit_button("정보 확인하기", use_container_width=True)
+
+    if submitted:
+        # Clear the previous result before validation/network work so stale data
+        # can never remain paired with a new or empty query.
+        st.session_state.pop("search_outcome", None)
+        if not query.strip():
+            st.error("지번 주소를 입력해 주세요.")
+        else:
+            try:
+                with st.spinner("건축HUB 건축물대장을 확인하고 있습니다…"):
+                    st.session_state.search_outcome = _search(
+                        query, _secret("BUILDING_HUB_API_KEY")
+                    )
+            except AddressParseError as error:
+                st.error(str(error))
+
+    outcome = st.session_state.get("search_outcome")
+    if outcome is None:
+        _render_intro()
+    elif outcome.snapshot is not None:
+        _render_api(outcome)
+    elif outcome.legacy:
+        _render_legacy(outcome)
+    else:
+        st.error(
+            f"{outcome.api_error or '조회에 실패했습니다.'} "
+            "보조 스냅샷에도 해당 지번이 없습니다."
+        )
+
+    with st.expander("데이터 출처와 확인 범위"):
+        st.write(
+            "건축HUB 건축물대장정보는 월간 갱신 공개자료입니다. 이 화면은 공식 증명서가 아니며, "
+            "계약·권리분석 등 중요한 판단은 세움터·정부24 발급 대장으로 최종 확인해야 합니다."
+        )
+        st.write(
+            "다가구 호별 면적대장과 위반건축물 여부는 건축HUB 공개 API에 없습니다. "
+            "없는 값을 0 또는 정상으로 추정하지 않습니다."
+        )
+
+
+if __name__ == "__main__":
+    render_app()
