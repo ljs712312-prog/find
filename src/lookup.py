@@ -498,12 +498,21 @@ def _is_collective(rows: Sequence[Mapping[str, Any]]) -> bool:
 
 
 def _is_multi_family_house(rows: Sequence[Mapping[str, Any]]) -> bool:
-    return any(
-        "다가구" in " ".join(
+    for row in rows:
+        purpose = " ".join(
             filter(None, (_text(row, "mainPurpsCdNm"), _text(row, "etcPurps")))
         )
-        for row in rows
-    )
+        if "다가구" in purpose:
+            return True
+        # BuildingHUB commonly returns a 다가구 title simply as
+        # ``단독주택`` while exposing its household composition only through
+        # fmlyCnt.  More than one explicit family under the detached-house
+        # category is enough to show the data-availability warning; it is not
+        # used to invent units or areas.
+        family_count = _integer(row.get("fmlyCnt"))
+        if "단독주택" in purpose and family_count is not None and family_count > 1:
+            return True
+    return False
 
 
 def _make_title(title_pk: str, rows: Sequence[Mapping[str, Any]]) -> TitleSummary:

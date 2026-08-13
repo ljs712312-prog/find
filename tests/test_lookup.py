@@ -246,6 +246,29 @@ def test_general_multifamily_units_are_only_explicit_api_rows() -> None:
     assert "별도 근거 확인" in result.violation.note
 
 
+def test_detached_house_with_multiple_explicit_families_is_flagged_for_notice() -> None:
+    client = MockClient(
+        {
+            TITLE_ENDPOINT: [
+                land_row(
+                    mgmBldrgstPk="TITLE-DAGAGU",
+                    regstrGbCd="1",
+                    regstrGbCdNm="일반",
+                    mainPurpsCdNm="단독주택",
+                    etcPurps="단독주택",
+                    fmlyCnt="8",
+                )
+            ]
+        }
+    )
+
+    title = lookup_buildings(client, LAND_KEY).titles[0]
+
+    assert title.is_multi_family_house is True
+    assert title.family_count == 8
+    assert title.units == ()
+
+
 def test_ambiguous_parent_graph_does_not_guess_a_title() -> None:
     client = MockClient(
         {
