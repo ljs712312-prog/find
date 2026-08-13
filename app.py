@@ -336,21 +336,21 @@ def _render_vworld_reference(reference: ViolationReference) -> None:
         )
 
 
-def _render_portal_reference(reference: PortalBuildingReference) -> None:
+def _portal_status_text(reference: PortalBuildingReference) -> tuple[str, str]:
     if reference.state is PortalBuildingState.NOT_LISTED:
-        st.warning(
-            "경기부동산포털의 건축물 선택 결과가 ‘해당 사항 없음’입니다. "
-            "이 결과만으로 위반 여부를 판단할 수 없습니다. 위반·보안건축물뿐 아니라 "
-            "연계 누락·자료 없음도 똑같이 표시됩니다."
+        return (
+            "warning",
+            "경기부동산포털상 해당 사항 없음 — 위반건축물 의심 · 참고용(확정 아님)",
         )
-    else:
-        st.info(
-            f"경기부동산포털에 건축물 {reference.building_count:,}건이 표시됩니다. "
-            "경기부동산포털은 2025년 9월 12일부터 위반정보를 제공하지 않으므로, "
-            "표시된다는 사실도 ‘적법’ 판정은 아닙니다."
-        )
-        if reference.building_names:
-            st.caption("포털 표시: " + " · ".join(reference.building_names[:5]))
+    return (
+        "success",
+        "경기부동산포털상 결과 확인 — 위반건축물 아님 · 참고용(법적 판정 아님)",
+    )
+
+
+def _render_portal_reference(reference: PortalBuildingReference) -> None:
+    level, message = _portal_status_text(reference)
+    getattr(st, level)(message)
 
 
 def _render_violation(parsed: ParsedAddress) -> None:
@@ -361,11 +361,8 @@ def _render_violation(parsed: ParsedAddress) -> None:
     if not isinstance(current, dict) or current.get("identity") != identity:
         current = {"identity": identity}
 
-    st.markdown("### 위반건축물 참고 확인")
-    st.caption(
-        "아래 조회는 자동 실행되지 않습니다. 경기포털 결과와 VWorld 값은 모두 "
-        "1차 확인용이며, 최종 판단은 정부24·세움터 발급 건축물대장으로 해야 합니다."
-    )
+    st.markdown("### 위반건축물 간편 확인")
+    st.caption("버튼을 누르면 경기부동산포털 기준으로 확인합니다.")
 
     portal_clicked = False
     vworld_clicked = False

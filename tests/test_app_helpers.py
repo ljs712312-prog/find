@@ -6,6 +6,7 @@ from app import (
     _decimal_text,
     _friendly_api_error,
     _metric_cards,
+    _portal_status_text,
     _sum_int_fields,
     _unit_floor_label,
     _unit_total,
@@ -13,6 +14,7 @@ from app import (
 )
 from src.address import parse_address
 from src.building_hub import BuildingHubAPIError, BuildingHubAuthError
+from src.gyeonggi_portal import PortalBuildingReference, PortalBuildingState
 
 
 def test_date_formats_only_known_precisions() -> None:
@@ -79,3 +81,27 @@ def test_violation_lookup_identity_changes_with_lot() -> None:
     second = parse_address("망포동 6-12")
 
     assert _violation_lookup_identity(first) != _violation_lookup_identity(second)
+
+
+def test_portal_status_text_is_short_and_explicit() -> None:
+    missing = PortalBuildingReference(
+        state=PortalBuildingState.NOT_LISTED,
+        building_count=0,
+        building_names=(),
+        source_url="https://example.com/missing",
+    )
+    visible = PortalBuildingReference(
+        state=PortalBuildingState.VISIBLE,
+        building_count=1,
+        building_names=("건축물",),
+        source_url="https://example.com/visible",
+    )
+
+    assert _portal_status_text(missing) == (
+        "warning",
+        "경기부동산포털상 해당 사항 없음 — 위반건축물 의심 · 참고용(확정 아님)",
+    )
+    assert _portal_status_text(visible) == (
+        "success",
+        "경기부동산포털상 결과 확인 — 위반건축물 아님 · 참고용(법적 판정 아님)",
+    )

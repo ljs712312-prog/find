@@ -65,7 +65,7 @@ def test_violation_screening_is_opt_in_and_has_official_fallback() -> None:
     rendered_text = " ".join(
         item.value for item in (*app.caption, *app.info, *app.warning)
     )
-    assert "1차 확인용" in rendered_text
+    assert "경기부동산포털 기준" in rendered_text
     assert "해당 사항 없음" not in rendered_text
 
 
