@@ -33,6 +33,12 @@ from src.vworld import (
 )
 
 
+# Bump this whenever cached API response interpretation changes.  Streamlit
+# hashes this argument into each entry, so a hot deploy cannot keep serving a
+# snapshot produced by an older register-mapping rule.
+LOOKUP_CACHE_SCHEMA = "2026-08-13.2"
+
+
 @dataclass(frozen=True, slots=True)
 class SearchOutcome:
     parsed: ParsedAddress
@@ -66,12 +72,13 @@ def _lookup_api_cached(
     plat_gb_cd: str,
     bun: str,
     ji: str,
+    cache_schema: str,
     key_fingerprint: str,
     _service_key: str,
 ) -> RegisterSnapshot:
     # ``key_fingerprint`` invalidates old cached responses after key rotation;
     # the actual secret is excluded from Streamlit's cache key and never logged.
-    del key_fingerprint
+    del cache_schema, key_fingerprint
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
     with BuildingHubClient(_service_key) as client:
         return lookup_register(client, land_key)
@@ -132,6 +139,7 @@ def _search(query: str, service_key: str | None) -> SearchOutcome:
         try:
             snapshot = _lookup_api_cached(
                 *_land_args(parsed.land_key),
+                LOOKUP_CACHE_SCHEMA,
                 _key_fingerprint(service_key),
                 service_key,
             )
@@ -367,7 +375,7 @@ def _render_building(building: TitleSummary, index: int) -> None:
             st.dataframe(
                 _floor_table(building),
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.info("이 건축물의 층별개요가 공개 API에 없습니다.")
@@ -378,7 +386,7 @@ def _render_building(building: TitleSummary, index: int) -> None:
             st.dataframe(
                 _unit_table(building),
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
             )
             st.caption(
                 "전유·공용 면적은 호실 관리 PK가 같은 모든 면적 행을 구분해 합산했습니다. "
@@ -438,7 +446,7 @@ def _render_legacy_building(building: LegacyBuilding, index: int) -> None:
                 for item in building.floors
             ]
             data.sort(key=lambda item: _natural_key(item["층"]))
-            st.dataframe(pd.DataFrame(data), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(data), hide_index=True, width="stretch")
 
 
 def _render_legacy(outcome: SearchOutcome) -> None:
@@ -488,7 +496,7 @@ def render_app() -> None:
             placeholder="예: 망포동 6-11 / 오목천동 산1-5",
             help="현재 수원시 법정동 지번을 지원합니다.",
         )
-        submitted = st.form_submit_button("정보 확인하기", use_container_width=True)
+        submitted = st.form_submit_button("정보 확인하기", width="stretch")
 
     if submitted:
         # Clear the previous result before validation/network work so stale data
