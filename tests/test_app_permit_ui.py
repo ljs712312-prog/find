@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from streamlit.testing.v1 import AppTest
 
-from app import SearchOutcome
+from app import PERMIT_LOOKUP_STATE_KEY, SearchOutcome
 from src.address import LandKey, ParsedAddress
 from src.permit_lookup import (
     PermitCaseReference,
@@ -57,38 +57,48 @@ def _base_outcome(**changes: object) -> SearchOutcome:
     return SearchOutcome(**values)
 
 
-def _reference() -> PermitHouseholdReference:
+def _case(
+    case_pk: str,
+    *,
+    use_approval_date: str,
+    area: str,
+    ho_name: str,
+    matches_register_approval_date: bool,
+) -> PermitCaseReference:
     unit = PermitUnitReference(
-        case_pk="CASE-1",
-        unit_pk="UNIT-201",
-        dong_pk="DONG-1",
+        case_pk=case_pk,
+        unit_pk=f"UNIT-{case_pk}",
+        dong_pk=f"DONG-{case_pk}",
         dong_name="주건축물",
-        ho_number="201",
-        ho_name="201호",
+        ho_number=ho_name.removesuffix("호"),
+        ho_name=ho_name,
         floor_group_name="지상",
         floor_number=2,
         change_name="신규",
-        exclusive_area=Decimal("31.25"),
+        exclusive_area=Decimal(area),
         common_area=Decimal("0"),
         other_area=None,
         area_components=(),
     )
-    case = PermitCaseReference(
-        case_pk="CASE-1",
+    return PermitCaseReference(
+        case_pk=case_pk,
         building_name="다가구 테스트",
         application_type="신축",
         permit_date="20180101",
-        use_approval_date="20190902",
+        use_approval_date=use_approval_date,
         source_as_of="20260814",
         expected_family_count=1,
         expected_household_count=None,
         housing_types=("다가구주택",),
-        matches_register_approval_date=True,
+        matches_register_approval_date=matches_register_approval_date,
         units=(unit,),
     )
+
+
+def _reference(*cases: PermitCaseReference) -> PermitHouseholdReference:
     return PermitHouseholdReference(
         land_key=LAND,
-        cases=(case,),
+        cases=cases,
         unlinked_unit_count=0,
         orphan_area_count=0,
         endpoint_stats=(),
@@ -97,36 +107,168 @@ def _reference() -> PermitHouseholdReference:
     )
 
 
-def test_permit_reference_is_separate_and_explicitly_non_authoritative() -> None:
-    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
-    app.session_state["search_outcome"] = _base_outcome(
-        permit_reference=_reference()
-    )
-    app.run()
+def _permit_state(
+    *,
+    reference: PermitHouseholdReference | None = None,
+    error: str | None = None,
+    land: LandKey = LAND,
+) -> dict[str, object | None]:
+    return {
+        "identity": (
+            land.sigungu_cd,
+            land.bjdong_cd,
+            land.plat_gb_cd,
+            land.bun,
+            land.ji,
+        ),
+        "reference": reference,
+        "error": error,
+    }
 
-    assert not app.exception
-    rendered = " ".join(
+
+def _button(app: AppTest, label: str):
+    return next(item for item in app.button if item.label == label)
+
+
+def _rendered_text(app: AppTest) -> str:
+    return " ".join(
         item.value
         for item in (
             *app.markdown,
             *app.caption,
             *app.info,
             *app.warning,
+            *app.success,
         )
     )
-    assert "다가구 호별면적 자동 참고조회" in rendered
-    assert "별지 제9호 또는 현재 건축물대장 확정값은 아닙니다" in rendered
-    assert len(app.dataframe) == 1
-    assert app.dataframe[0].value.loc[0, "전유면적(㎡)"] == "31.25"
 
 
-def test_permit_failure_does_not_hide_register_result() -> None:
+def test_permit_lookup_waits_for_button_click_and_failure_is_isolated() -> None:
     app = AppTest.from_file(str(APP_PATH), default_timeout=10)
-    app.session_state["search_outcome"] = _base_outcome(
-        permit_error="건축인허가 참고조회 실패",
+    app.session_state["search_outcome"] = _base_outcome()
+    app.run()
+
+    assert not app.exception
+    assert "다가구 호별면적 참고조회" in _rendered_text(app)
+    assert "버튼을 누를 때만 이 정확한 지번" in _rendered_text(app)
+    assert "아직 건축인허가 호별자료를 조회하지 않았습니다" in _rendered_text(app)
+    assert len(app.dataframe) == 0
+
+    _button(app, "이 지번의 인허가 호별면적 조회").click().run()
+
+    assert not app.exception
+    assert any("공식 건축HUB에서 건축물 1건" in item.value for item in app.success)
+    assert any(
+        "인증키가 설정되지 않았습니다" in item.value
+        and "건축물대장 조회 결과에는 영향이 없습니다" in item.value
+        for item in app.warning
+    )
+
+
+def test_matching_case_is_primary_and_other_history_is_unconfirmed() -> None:
+    current = _case(
+        "CURRENT",
+        use_approval_date="20190902",
+        area="31.25",
+        ho_name="201호",
+        matches_register_approval_date=True,
+    )
+    old = _case(
+        "OLD",
+        use_approval_date="20140103",
+        area="22.5",
+        ho_name="101호",
+        matches_register_approval_date=False,
+    )
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.session_state["search_outcome"] = _base_outcome()
+    app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(
+        reference=_reference(current, old)
     )
     app.run()
 
     assert not app.exception
-    assert any("공식 건축HUB에서 건축물 1건" in item.value for item in app.success)
-    assert any("위의 건축물대장 조회 결과에는 영향이 없습니다" in item.value for item in app.warning)
+    rendered = _rendered_text(app)
+    assert "현재 건축물대장 사용승인일과 정확히 일치" in rendered
+    assert "그 사실만으로 현재 건물 귀속이 확정되지는 않습니다" in rendered
+    assert "별지 제9호 또는 현재 건축물대장 확정값이 아닙니다" in rendered
+    assert any(
+        item.label == "과거·기타 인허가 이력(현재 건물 귀속 확인 안 됨)"
+        for item in app.expander
+    )
+    assert len(app.dataframe) == 2
+    assert app.dataframe[0].value.loc[0, "전유면적(㎡)"] == "31.25"
+    assert app.dataframe[1].value.loc[0, "전유면적(㎡)"] == "22.5"
+
+
+def test_no_approval_date_match_marks_every_case_unconfirmed() -> None:
+    old = _case(
+        "OLD",
+        use_approval_date="20140103",
+        area="22.5",
+        ho_name="101호",
+        matches_register_approval_date=False,
+    )
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.session_state["search_outcome"] = _base_outcome()
+    app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(
+        reference=_reference(old)
+    )
+    app.run()
+
+    assert not app.exception
+    assert any(
+        "정확히 일치하는 인허가 이력이 없습니다" in item.value
+        and "비확정 자료" in item.value
+        for item in app.warning
+    )
+    assert any(
+        item.label == "과거·기타 인허가 이력(현재 건물 귀속 확인 안 됨)"
+        for item in app.expander
+    )
+    assert "현재 대장 승인일 일치" not in _rendered_text(app)
+
+
+def test_permit_state_for_another_exact_lot_is_not_rendered() -> None:
+    current = _case(
+        "CURRENT",
+        use_approval_date="20190902",
+        area="31.25",
+        ho_name="201호",
+        matches_register_approval_date=True,
+    )
+    another_lot = LandKey("41113", "12600", "0", "0092", "0008")
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.session_state["search_outcome"] = _base_outcome()
+    app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(
+        reference=_reference(current),
+        land=another_lot,
+    )
+    app.run()
+
+    assert not app.exception
+    assert len(app.dataframe) == 0
+    assert "아직 건축인허가 호별자료를 조회하지 않았습니다" in _rendered_text(app)
+    assert PERMIT_LOOKUP_STATE_KEY not in app.session_state
+
+
+def test_new_search_clears_permit_session_state() -> None:
+    current = _case(
+        "CURRENT",
+        use_approval_date="20190902",
+        area="31.25",
+        ho_name="201호",
+        matches_register_approval_date=True,
+    )
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.session_state["search_outcome"] = _base_outcome()
+    app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(
+        reference=_reference(current)
+    )
+    app.run()
+
+    _button(app, "정보 확인하기").click().run()
+
+    assert not app.exception
+    assert PERMIT_LOOKUP_STATE_KEY not in app.session_state
+    assert any("지번 주소를 입력해 주세요" in item.value for item in app.error)

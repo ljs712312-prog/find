@@ -229,6 +229,181 @@ def test_wrong_land_or_orphan_pk_is_not_guessed_and_conflict_is_not_summed() -> 
     ).rejected_count == 1
 
 
+def test_ambiguous_or_unscoped_area_rows_are_excluded_with_warnings() -> None:
+    client = MockClient(
+        {
+            PERMIT_BASIS_ENDPOINT: [land_row(mgmPmsrgstPk="CASE-1")],
+            PERMIT_HOUSEHOLD_ENDPOINT: [
+                land_row(mgmPmsrgstPk="CASE-1", mgmHoDetlPk="UNIT-1")
+            ],
+            PERMIT_HOUSEHOLD_AREA_ENDPOINT: [
+                land_row(
+                    mgmHoDetlPk="UNIT-1",
+                    mgmHoExposPubuseAreaPk="VALID",
+                    exposPubuseGbCd="1",
+                    exposPubuseGbCdNm="전유",
+                    area="12",
+                ),
+                land_row(
+                    mgmHoDetlPk="UNIT-1",
+                    mgmHoExposPubuseAreaPk="CATEGORY-CONFLICT",
+                    exposPubuseGbCd="1",
+                    exposPubuseGbCdNm="공용",
+                    area="100",
+                ),
+                land_row(
+                    mgmHoDetlPk="UNIT-1",
+                    exposPubuseGbCd="1",
+                    exposPubuseGbCdNm="전유",
+                    area="200",
+                ),
+                land_row(
+                    mgmPmsrgstPk="OTHER-CASE",
+                    mgmHoDetlPk="UNIT-1",
+                    mgmHoExposPubuseAreaPk="WRONG-CASE",
+                    exposPubuseGbCd="1",
+                    exposPubuseGbCdNm="전유",
+                    area="300",
+                ),
+            ],
+        }
+    )
+
+    result = lookup_permit_households(client, LAND)
+
+    unit = result.cases[0].units[0]
+    assert unit.exclusive_area == Decimal("12")
+    assert [component.area_pk for component in unit.area_components] == ["VALID"]
+    assert any("전유·공용 코드와 명칭이 충돌" in item for item in result.warnings)
+    assert any("면적 PK가 없는 1개 행" in item for item in result.warnings)
+    assert any("인허가 이력 PK가 일치하지 않는 면적 1개 행" in item for item in result.warnings)
+
+
+def test_deleted_or_ambiguous_change_units_are_excluded() -> None:
+    client = MockClient(
+        {
+            PERMIT_BASIS_ENDPOINT: [land_row(mgmPmsrgstPk="CASE-1")],
+            PERMIT_HOUSEHOLD_ENDPOINT: [
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmHoDetlPk="KEEP",
+                    changGbCd="1",
+                ),
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmHoDetlPk="NO-CODE",
+                ),
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmHoDetlPk="DELETED",
+                    changGbCd="4",
+                ),
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmHoDetlPk="MIXED",
+                    changGbCd="1",
+                ),
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmHoDetlPk="MIXED",
+                    changGbCd="2",
+                ),
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmHoDetlPk="PARTIAL",
+                    changGbCd="1",
+                ),
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmHoDetlPk="PARTIAL",
+                    changGbCd=None,
+                ),
+            ],
+        }
+    )
+
+    result = lookup_permit_households(client, LAND)
+
+    assert {unit.unit_pk for unit in result.cases[0].units} == {"KEEP", "NO-CODE"}
+    assert any("코드 4(삭제)" in item for item in result.warnings)
+    assert sum("혼합되거나 누락" in item for item in result.warnings) == 2
+
+
+def test_completeness_uses_only_documented_family_count() -> None:
+    client = MockClient(
+        {
+            PERMIT_BASIS_ENDPOINT: [
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    fmlyCnt="3",
+                    hhldCnt="9",
+                    hoCnt="11",
+                )
+            ]
+        }
+    )
+
+    result = lookup_permit_households(client, LAND)
+
+    case = result.cases[0]
+    assert case.expected_family_count == 3
+    assert case.expected_household_count is None
+
+
+def test_undocumented_field_aliases_are_not_used() -> None:
+    client = MockClient(
+        {
+            PERMIT_BASIS_ENDPOINT: [
+                land_row(mgmPmsrgstPk="CASE-1", pmsDay="20200101")
+            ],
+            PERMIT_DONG_ENDPOINT: [
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmDongOulnPk="DONG-1",
+                    dongNm="별칭 동",
+                )
+            ],
+            PERMIT_HOUSEHOLD_ENDPOINT: [
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmDongOulnPk="DONG-1",
+                    mgmHoDetlPk="UNIT-1",
+                    dongNm="별칭 호 동",
+                ),
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmHoOulnPk="ALIAS-ONLY-UNIT",
+                ),
+            ],
+            PERMIT_HOUSEHOLD_AREA_ENDPOINT: [
+                land_row(
+                    mgmHoDetlPk="UNIT-1",
+                    mgmHoExposPubuseAreaPk="AREA-1",
+                    exposPubuseGbCd="1",
+                    area="10",
+                ),
+                land_row(
+                    mgmHoOulnPk="ALIAS-ONLY-UNIT",
+                    mgmHoExposPubuseAreaPk="ALIAS-AREA",
+                    exposPubuseGbCd="1",
+                    area="999",
+                ),
+            ],
+        }
+    )
+
+    result = lookup_permit_households(client, LAND)
+
+    case = result.cases[0]
+    assert case.permit_date is None
+    assert len(case.units) == 1
+    assert case.units[0].unit_pk == "UNIT-1"
+    assert case.units[0].dong_name is None
+    assert case.units[0].exclusive_area == Decimal("10")
+    assert result.orphan_area_count == 1
+    assert any("호별개요 관리 PK가 없는 행" in item for item in result.warnings)
+
+
 def test_empty_success_response_stays_empty_not_zero() -> None:
     result = lookup_permit_households(MockClient({}), LAND)
 

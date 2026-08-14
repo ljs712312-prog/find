@@ -56,6 +56,7 @@ def test_violation_screening_is_opt_in_and_has_official_fallback() -> None:
     assert [button.label for button in app.button] == [
         "정보 확인하기",
         "경기부동산포털 1차 확인",
+        "이 지번의 인허가 호별면적 조회",
     ]
     links = {item.label: item.url for item in app.get("link_button")}
     assert links["경기포털에서 직접 보기"].endswith(

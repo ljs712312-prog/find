@@ -267,20 +267,40 @@ def _validate_and_dedupe(
     )
 
 
-def _classify_area(row: Mapping[str, Any]) -> PermitAreaCategory:
+def _classify_area(row: Mapping[str, Any]) -> PermitAreaCategory | None:
     code = _text(row, "exposPubuseGbCd")
     name = (_text(row, "exposPubuseGbCdNm") or "").replace(" ", "")
-    if code == "1" or name == "전유":
-        return PermitAreaCategory.EXCLUSIVE
-    if code == "2" or name == "공용":
-        return PermitAreaCategory.COMMON
-    return PermitAreaCategory.OTHER
+    code_category = {
+        "1": PermitAreaCategory.EXCLUSIVE,
+        "2": PermitAreaCategory.COMMON,
+    }.get(code)
+    name_exclusive = "전유" in name
+    name_common = "공용" in name
+    if name_exclusive and name_common:
+        return None
+    name_category = (
+        PermitAreaCategory.EXCLUSIVE
+        if name_exclusive
+        else PermitAreaCategory.COMMON
+        if name_common
+        else None
+    )
+    if (
+        code_category is not None
+        and name_category is not None
+        and code_category is not name_category
+    ):
+        return None
+    return name_category or code_category or PermitAreaCategory.OTHER
 
 
 def _component(row: Mapping[str, Any]) -> PermitAreaComponent:
+    category = _classify_area(row)
+    if category is None:
+        raise PermitLookupDataError("전유·공용 코드와 명칭이 충돌하는 면적 행입니다.")
     return PermitAreaComponent(
         area_pk=_text(row, "mgmHoExposPubuseAreaPk"),
-        category=_classify_area(row),
+        category=category,
         exposure_use_code=_text(row, "exposPubuseGbCd"),
         exposure_use_name=_text(row, "exposPubuseGbCdNm"),
         purpose_code=_text(row, "mainPurpsCd"),
@@ -292,21 +312,45 @@ def _component(row: Mapping[str, Any]) -> PermitAreaComponent:
 
 def _safe_area_rows(
     unit_pk: str,
+    case_pk: str,
     rows: Sequence[Mapping[str, Any]],
 ) -> tuple[list[Mapping[str, Any]], tuple[str, ...]]:
-    """Drop conflicting duplicates that share one official area PK."""
+    """Keep only unambiguous rows under one unit and permit case."""
 
     by_area_pk: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    without_pk: list[Mapping[str, Any]] = []
+    missing_area_pk = 0
+    mismatched_case = 0
+    conflicting_category = 0
     for row in rows:
         area_pk = _text(row, "mgmHoExposPubuseAreaPk")
-        if area_pk:
-            by_area_pk[area_pk].append(row)
-        else:
-            without_pk.append(row)
+        if area_pk is None:
+            missing_area_pk += 1
+            continue
+        area_case_pk = _text(row, "mgmPmsrgstPk")
+        if area_case_pk is not None and area_case_pk != case_pk:
+            mismatched_case += 1
+            continue
+        if _classify_area(row) is None:
+            conflicting_category += 1
+            continue
+        by_area_pk[area_pk].append(row)
 
-    safe = list(without_pk)
+    safe: list[Mapping[str, Any]] = []
     warnings: list[str] = []
+    if missing_area_pk:
+        warnings.append(
+            f"호 관리 PK {unit_pk}의 면적 PK가 없는 {missing_area_pk}개 행을 제외했습니다."
+        )
+    if mismatched_case:
+        warnings.append(
+            f"호 관리 PK {unit_pk}의 인허가 이력 PK가 일치하지 않는 "
+            f"면적 {mismatched_case}개 행을 제외했습니다."
+        )
+    if conflicting_category:
+        warnings.append(
+            f"호 관리 PK {unit_pk}의 전유·공용 코드와 명칭이 충돌하는 "
+            f"면적 {conflicting_category}개 행을 제외했습니다."
+        )
     for area_pk, area_rows in by_area_pk.items():
         if len(area_rows) == 1:
             safe.append(area_rows[0])
@@ -315,6 +359,19 @@ def _safe_area_rows(
             f"호 관리 PK {unit_pk}의 면적 PK {area_pk}가 서로 다른 값으로 중복되어 합계에서 제외했습니다."
         )
     return safe, tuple(warnings)
+
+
+def _unit_change_exclusion_warning(
+    unit_pk: str,
+    rows: Sequence[Mapping[str, Any]],
+) -> str | None:
+    supplied_codes = tuple(_text(row, "changGbCd") for row in rows)
+    codes = {code for code in supplied_codes if code is not None}
+    if "4" in codes:
+        return f"호 관리 PK {unit_pk}는 변경구분 코드 4(삭제)가 있어 제외했습니다."
+    if codes and (len(codes) != 1 or any(code is None for code in supplied_codes)):
+        return f"호 관리 PK {unit_pk}의 변경구분 코드가 혼합되거나 누락되어 제외했습니다."
+    return None
 
 
 def _sum_category(
@@ -398,7 +455,7 @@ def lookup_permit_households(
     area_by_unit: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     orphan_area_count = 0
     for row in rows_by_endpoint[PERMIT_HOUSEHOLD_AREA_ENDPOINT]:
-        unit_pk = _text(row, "mgmHoDetlPk", "mgmHoOulnPk")
+        unit_pk = _text(row, "mgmHoDetlPk")
         if unit_pk:
             area_by_unit[unit_pk].append(row)
         else:
@@ -406,7 +463,7 @@ def lookup_permit_households(
 
     unit_groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows_by_endpoint[PERMIT_HOUSEHOLD_ENDPOINT]:
-        unit_pk = _text(row, "mgmHoDetlPk", "mgmHoOulnPk")
+        unit_pk = _text(row, "mgmHoDetlPk")
         if unit_pk:
             unit_groups[unit_pk].append(row)
         else:
@@ -425,6 +482,11 @@ def lookup_permit_households(
     units_by_case: dict[str, list[PermitUnitReference]] = defaultdict(list)
     unlinked_unit_count = 0
     for unit_pk, unit_rows in unit_groups.items():
+        change_warning = _unit_change_exclusion_warning(unit_pk, unit_rows)
+        if change_warning is not None:
+            warnings.append(change_warning)
+            continue
+
         case_pk = _consensus_text(unit_rows, "mgmPmsrgstPk")
         if case_pk is None or case_pk not in basis_by_case:
             unlinked_unit_count += 1
@@ -442,15 +504,14 @@ def lookup_permit_households(
                 continue
 
         safe_area_rows, unit_warnings = _safe_area_rows(
-            unit_pk, area_by_unit.get(unit_pk, ())
+            unit_pk, case_pk, area_by_unit.get(unit_pk, ())
         )
         components = tuple(_component(row) for row in safe_area_rows)
         unit = PermitUnitReference(
             case_pk=case_pk,
             unit_pk=unit_pk,
             dong_pk=dong_pk,
-            dong_name=_consensus_text(dong_rows, "bldNm", "dongNm")
-            or _consensus_text(unit_rows, "dongNm"),
+            dong_name=_consensus_text(dong_rows, "bldNm"),
             ho_number=_consensus_text(unit_rows, "hoNo"),
             ho_name=_consensus_text(unit_rows, "hoNm"),
             floor_group_name=_consensus_text(unit_rows, "flrGbCdNm"),
@@ -502,13 +563,14 @@ def lookup_permit_households(
                 case_pk=case_pk,
                 building_name=_consensus_text(basis_rows, "bldNm"),
                 application_type=_consensus_text(basis_rows, "archGbCdNm"),
-                permit_date=_consensus_text(basis_rows, "archPmsDay", "pmsDay"),
+                permit_date=_consensus_text(basis_rows, "archPmsDay"),
                 use_approval_date=use_approval_date,
                 source_as_of=case_source,
                 expected_family_count=_consensus_integer(basis_rows, "fmlyCnt"),
-                expected_household_count=_consensus_integer(
-                    basis_rows, "hhldCnt", "hoCnt"
-                ),
+                # The permit API's documented multi-family completeness count is
+                # fmlyCnt.  Keep this compatibility field unset rather than
+                # guessing from building-register or undocumented aliases.
+                expected_household_count=None,
                 housing_types=tuple(housing_types_by_case.get(case_pk, ())),
                 matches_register_approval_date=bool(
                     use_approval_date and use_approval_date in approval_dates
