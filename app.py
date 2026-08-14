@@ -23,6 +23,7 @@ from src.building_hub import (
     BuildingHubQuotaError,
     BuildingHubRateLimitError,
 )
+from src.building_permit import BuildingPermitHubClient
 from src.gyeonggi_portal import (
     GyeonggiPortalClient,
     GyeonggiPortalError,
@@ -32,6 +33,11 @@ from src.gyeonggi_portal import (
 )
 from src.legacy import LegacyBuilding, load_legacy_frames, lookup_legacy
 from src.lookup import RegisterSnapshot, TitleSummary, UnitSummary, lookup_register
+from src.permit_lookup import (
+    PermitCaseReference,
+    PermitHouseholdReference,
+    lookup_permit_households,
+)
 from src.vworld import (
     ViolationReference,
     ViolationState,
@@ -43,7 +49,8 @@ from src.vworld import (
 # Bump this whenever cached API response interpretation changes.  Streamlit
 # hashes this argument into each entry, so a hot deploy cannot keep serving a
 # snapshot produced by an older register-mapping rule.
-LOOKUP_CACHE_SCHEMA = "2026-08-13.2"
+LOOKUP_CACHE_SCHEMA = "2026-08-14.1"
+PERMIT_CACHE_SCHEMA = "2026-08-14.1"
 GOVERNMENT24_REGISTER_URL = (
     "https://www.gov.kr/mw/AA020InfoCappView.do?CappBizCD=15000000098"
 )
@@ -54,6 +61,8 @@ VIOLATION_LOOKUP_STATE_KEY = "violation_lookup"
 class SearchOutcome:
     parsed: ParsedAddress
     snapshot: RegisterSnapshot | None = None
+    permit_reference: PermitHouseholdReference | None = None
+    permit_error: str | None = None
     legacy: tuple[LegacyBuilding, ...] = ()
     api_error: str | None = None
     used_legacy: bool = False
@@ -93,6 +102,30 @@ def _lookup_api_cached(
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
     with BuildingHubClient(_service_key) as client:
         return lookup_register(client, land_key)
+
+
+@st.cache_data(ttl=6 * 60 * 60, max_entries=256, show_spinner=False)
+def _lookup_permit_cached(
+    sigungu_cd: str,
+    bjdong_cd: str,
+    plat_gb_cd: str,
+    bun: str,
+    ji: str,
+    register_approval_dates: tuple[str, ...],
+    cache_schema: str,
+    key_fingerprint: str,
+    _service_key: str,
+) -> PermitHouseholdReference:
+    # Keep the permit cache independent from the certified-register mapping.
+    # The real key is excluded from the cache identity and never logged.
+    del cache_schema, key_fingerprint
+    land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
+    with BuildingPermitHubClient(_service_key) as client:
+        return lookup_permit_households(
+            client,
+            land_key,
+            register_approval_dates=register_approval_dates,
+        )
 
 
 @st.cache_data(show_spinner=False)
@@ -156,7 +189,32 @@ def _friendly_api_error(error: BuildingHubError) -> str:
     return "건축HUB 응답을 처리하지 못했습니다."
 
 
-def _search(query: str, service_key: str | None) -> SearchOutcome:
+def _friendly_permit_error(error: BuildingHubError) -> str:
+    """Return a concise permit-reference error without exposing credentials."""
+
+    if isinstance(error, BuildingHubAuthError):
+        return (
+            "건축인허가정보 서비스 권한이 아직 API 게이트웨이에 반영되지 않았습니다. "
+            "승인 직후라면 잠시 후 다시 조회해 주세요."
+        )
+    if isinstance(error, BuildingHubQuotaError):
+        return "오늘의 건축인허가정보 API 호출 한도를 모두 사용했습니다."
+    if isinstance(error, BuildingHubRateLimitError):
+        return "건축인허가 참고조회 요청이 몰렸습니다. 잠시 후 다시 조회해 주세요."
+    if isinstance(error, BuildingHubNetworkError):
+        return "건축인허가정보 서버에 연결하지 못했습니다."
+    if isinstance(error, BuildingHubHTTPError):
+        return f"건축인허가정보 서버가 HTTP {error.status_code} 오류로 응답했습니다."
+    if isinstance(error, BuildingHubAPIError):
+        return f"건축인허가정보 API 오류가 발생했습니다. (코드 {error.result_code})"
+    return "건축인허가 참고자료를 처리하지 못했습니다."
+
+
+def _search(
+    query: str,
+    service_key: str | None,
+    permit_service_key: str | None = None,
+) -> SearchOutcome:
     parsed = parse_address(query)
     if service_key:
         try:
@@ -169,7 +227,41 @@ def _search(query: str, service_key: str | None) -> SearchOutcome:
         except BuildingHubError as error:
             api_error = _friendly_api_error(error)
         else:
-            return SearchOutcome(parsed=parsed, snapshot=snapshot)
+            multi_family = tuple(
+                building
+                for building in snapshot.buildings
+                if building.is_multi_family_house
+            )
+            permit_reference = None
+            permit_error = None
+            if multi_family:
+                permit_key = permit_service_key or service_key
+                if permit_key:
+                    approval_dates = tuple(
+                        dict.fromkeys(
+                            building.approval_date
+                            for building in multi_family
+                            if building.approval_date
+                        )
+                    )
+                    try:
+                        permit_reference = _lookup_permit_cached(
+                            *_land_args(parsed.land_key),
+                            approval_dates,
+                            PERMIT_CACHE_SCHEMA,
+                            _key_fingerprint(permit_key),
+                            permit_key,
+                        )
+                    except BuildingHubError as error:
+                        permit_error = _friendly_permit_error(error)
+                else:
+                    permit_error = "건축인허가정보 서비스 인증키가 설정되지 않았습니다."
+            return SearchOutcome(
+                parsed=parsed,
+                snapshot=snapshot,
+                permit_reference=permit_reference,
+                permit_error=permit_error,
+            )
     else:
         api_error = "배포 설정에 건축HUB API 키가 없습니다."
 
@@ -306,6 +398,113 @@ def _unit_table(building: TitleSummary) -> pd.DataFrame:
         )
     )
     return pd.DataFrame(rows)
+
+
+def _permit_unit_table(case: PermitCaseReference) -> pd.DataFrame:
+    rows = [
+        {
+            "동": unit.dong_name or "-",
+            "층": unit.floor_name or "-",
+            "호(가구)": unit.ho_name or unit.ho_number or "-",
+            "전유면적(㎡)": _decimal_text(unit.exclusive_area, suffix="").strip(),
+            "공용면적(㎡)": _decimal_text(unit.common_area, suffix="").strip(),
+            "전유+공용(㎡)": _decimal_text(unit.total_area, suffix="").strip(),
+            "용도": ", ".join(unit.purposes) or "-",
+            "변경구분": unit.change_name or "-",
+        }
+        for unit in case.units
+    ]
+    return pd.DataFrame(rows)
+
+
+def _permit_case_label(case: PermitCaseReference, index: int) -> str:
+    parts = [f"인허가 이력 {index + 1}"]
+    if case.application_type:
+        parts.append(case.application_type)
+    if case.use_approval_date:
+        parts.append(f"사용승인 {_date(case.use_approval_date)}")
+    if case.matches_register_approval_date:
+        parts.append("현재 대장 승인일 일치")
+    return " · ".join(parts)
+
+
+def _render_permit_reference(outcome: SearchOutcome) -> None:
+    assert outcome.snapshot is not None
+    if not any(
+        building.is_multi_family_house for building in outcome.snapshot.buildings
+    ):
+        return
+
+    st.markdown("### 다가구 호별면적 자동 참고조회")
+    st.caption(
+        "건축HUB 건축인허가 이력의 호별개요와 호별전유공용면적을 관리 PK로 연결했습니다. "
+        "별지 제9호 또는 현재 건축물대장 확정값은 아닙니다."
+    )
+
+    if outcome.permit_error:
+        st.warning(
+            f"{outcome.permit_error} 위의 건축물대장 조회 결과에는 영향이 없습니다."
+        )
+        return
+
+    reference = outcome.permit_reference
+    if reference is None:
+        st.info("건축인허가 참고조회를 실행하지 못했습니다.")
+        return
+
+    cases = tuple(case for case in reference.cases if case.units)
+    if not cases:
+        st.info(
+            "공개 건축인허가 자료에서도 이 지번에 연결되는 호별면적 행을 확인하지 못했습니다. "
+            "이는 0㎡라는 뜻이 아닙니다."
+        )
+    else:
+        if len(cases) > 1:
+            st.warning(
+                "같은 지번에 호별자료가 있는 인허가 이력이 여러 건입니다. "
+                "서로 다른 이력을 합산하지 않고 각각 표시합니다."
+            )
+        for index, case in enumerate(cases):
+            expanded = case.matches_register_approval_date or len(cases) == 1
+            with st.expander(_permit_case_label(case, index), expanded=expanded):
+                metadata = [
+                    ("건물명", case.building_name),
+                    ("허가일", _date(case.permit_date)),
+                    ("자료생성일", _date(case.source_as_of)),
+                    ("주택유형", ", ".join(case.housing_types) or None),
+                ]
+                st.caption(
+                    " · ".join(
+                        f"{name}: {value}"
+                        for name, value in metadata
+                        if value and value != "-"
+                    )
+                    or "인허가 이력 상세정보 없음"
+                )
+                st.dataframe(
+                    _permit_unit_table(case),
+                    hide_index=True,
+                    width="stretch",
+                )
+                expected = (
+                    case.expected_family_count
+                    if case.expected_family_count is not None
+                    else case.expected_household_count
+                )
+                if expected is not None and expected != len(case.units):
+                    st.warning(
+                        f"인허가 기본개요의 가구·세대 수({expected})와 "
+                        f"연결된 호별 행 수({len(case.units)})가 다릅니다."
+                    )
+
+    st.caption(
+        f"출처: 국토교통부 건축HUB 건축인허가정보 · "
+        f"자료생성일 {_date(reference.source_as_of)} · 월간 갱신"
+    )
+    if reference.warnings:
+        with st.expander("건축인허가 데이터 연결 주의사항"):
+            for warning in reference.warnings:
+                st.write(f"- {warning}")
 
 
 def _violation_lookup_identity(parsed: ParsedAddress) -> tuple[str, ...]:
@@ -525,10 +724,11 @@ def _render_building(building: TitleSummary, index: int) -> None:
             )
         elif building.is_collective:
             st.warning("집합건물이지만 공개 API에서 이 표제부에 연결되는 전유부를 확인하지 못했습니다.")
-        elif building.is_multi_family_house:
+
+        if building.is_multi_family_house:
             st.warning(
-                "다가구주택 호(가구)별 면적대장(별지 제9호)은 현재 건축HUB 공개 API가 제공하지 않습니다. "
-                "층 면적을 가구 수로 나누어 추정하지 않았습니다."
+                "다가구주택 호(가구)별 면적대장(별지 제9호)은 현재 건축물대장 공개 API가 제공하지 않습니다. "
+                "아래 건축인허가 호별면적은 별도 참고자료이며, 층 면적을 가구 수로 나누어 추정하지 않았습니다."
             )
 
 
@@ -548,6 +748,7 @@ def _render_api(outcome: SearchOutcome) -> None:
     _render_violation(outcome.parsed)
     for index, building in enumerate(snapshot.buildings):
         _render_building(building, index)
+    _render_permit_reference(outcome)
 
     if snapshot.warnings:
         with st.expander("데이터 연결 주의사항"):
@@ -642,9 +843,12 @@ def render_app() -> None:
             st.error("지번 주소를 입력해 주세요.")
         else:
             try:
-                with st.spinner("건축HUB 건축물대장을 확인하고 있습니다…"):
+                with st.spinner("건축HUB 건축물 정보를 확인하고 있습니다…"):
+                    building_key = _secret("BUILDING_HUB_API_KEY")
                     st.session_state.search_outcome = _search(
-                        query, _secret("BUILDING_HUB_API_KEY")
+                        query,
+                        building_key,
+                        _secret("ARCH_PMS_HUB_API_KEY") or building_key,
                     )
             except AddressParseError as error:
                 st.error(str(error))
@@ -669,8 +873,9 @@ def render_app() -> None:
             "계약·권리분석 등 중요한 판단은 세움터·정부24 발급 대장으로 최종 확인해야 합니다."
         )
         st.write(
-            "다가구 호별 면적대장과 위반건축물 여부는 건축HUB 공개 API에 없습니다. "
-            "없는 값을 0 또는 정상으로 추정하지 않습니다."
+            "다가구 호별 면적대장(별지 제9호)과 위반건축물 여부는 건축물대장 공개 API에 없습니다. "
+            "다가구 호별면적은 별도의 건축인허가 이력을 참고값으로만 표시하며, "
+            "없는 값을 0 또는 현재 대장 확정값으로 추정하지 않습니다."
         )
 
 

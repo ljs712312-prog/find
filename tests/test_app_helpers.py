@@ -5,7 +5,9 @@ from app import (
     _date,
     _decimal_text,
     _friendly_api_error,
+    _friendly_permit_error,
     _metric_cards,
+    _permit_unit_table,
     _portal_status_text,
     _sum_int_fields,
     _unit_floor_label,
@@ -15,6 +17,7 @@ from app import (
 from src.address import parse_address
 from src.building_hub import BuildingHubAPIError, BuildingHubAuthError
 from src.gyeonggi_portal import PortalBuildingReference, PortalBuildingState
+from src.permit_lookup import PermitUnitReference
 
 
 def test_date_formats_only_known_precisions() -> None:
@@ -41,6 +44,44 @@ def test_api_errors_are_user_friendly_without_raw_key_message() -> None:
     assert "secret" not in _friendly_api_error(auth)
     assert "secret" not in _friendly_api_error(generic)
     assert "동기화" in _friendly_api_error(generic)
+
+
+def test_permit_auth_error_is_separate_and_does_not_echo_secret() -> None:
+    auth = BuildingHubAuthError("30", "permit secret key", retryable=False)
+    message = _friendly_permit_error(auth)
+    assert "secret" not in message
+    assert "건축인허가정보" in message
+
+
+def test_permit_unit_table_keeps_missing_common_area_distinct() -> None:
+    unit = PermitUnitReference(
+        case_pk="CASE-1",
+        unit_pk="UNIT-1",
+        dong_pk=None,
+        dong_name="주건축물",
+        ho_number="201",
+        ho_name="201호",
+        floor_group_name="지상",
+        floor_number=2,
+        change_name=None,
+        exclusive_area=Decimal("31.25"),
+        common_area=None,
+        other_area=None,
+        area_components=(),
+    )
+    table = _permit_unit_table(SimpleNamespace(units=(unit,)))
+    assert table.to_dict("records") == [
+        {
+            "동": "주건축물",
+            "층": "2층",
+            "호(가구)": "201호",
+            "전유면적(㎡)": "31.25",
+            "공용면적(㎡)": "-",
+            "전유+공용(㎡)": "-",
+            "용도": "-",
+            "변경구분": "-",
+        }
+    ]
 
 
 def test_unit_total_does_not_treat_missing_common_area_as_zero() -> None:
