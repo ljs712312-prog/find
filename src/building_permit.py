@@ -22,6 +22,7 @@ class BuildingPermitHubClient(BuildingHubClient):
             "getApDongOulnInfo",
             "getApFlrOulnInfo",
             "getApHoOulnInfo",
+            "getApExposPubuseAreaInfo",
             "getApHoExposPubuseAreaInfo",
             "getApPlatPlcInfo",
             "getApHsTpInfo",

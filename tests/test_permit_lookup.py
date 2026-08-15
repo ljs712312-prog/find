@@ -7,10 +7,13 @@ from src.address import LandKey
 from src.permit_lookup import (
     PERMIT_BASIS_ENDPOINT,
     PERMIT_DONG_ENDPOINT,
+    PERMIT_FLOOR_ENDPOINT,
+    PERMIT_GENERAL_AREA_ENDPOINT,
     PERMIT_HOUSEHOLD_AREA_ENDPOINT,
     PERMIT_HOUSEHOLD_ENDPOINT,
     PERMIT_HOUSING_TYPE_ENDPOINT,
     PERMIT_LOOKUP_ENDPOINTS,
+    PERMIT_PARCEL_ENDPOINT,
     PermitAreaCategory,
     lookup_permit_households,
 )
@@ -410,3 +413,152 @@ def test_empty_success_response_stays_empty_not_zero() -> None:
     assert result.has_units is False
     assert result.cases == ()
     assert result.source_as_of is None
+
+
+def test_case_level_precision_fallback_preserves_unassigned_area_and_floor() -> None:
+    client = MockClient(
+        {
+            PERMIT_BASIS_ENDPOINT: [
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    bldNm="다가구 테스트",
+                    useAprDay="20231204",
+                    fmlyCnt="6",
+                    crtnDay="20231205",
+                )
+            ],
+            PERMIT_DONG_ENDPOINT: [
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmDongOulnPk="DONG-1",
+                    bldNm="주건축물",
+                )
+            ],
+            PERMIT_GENERAL_AREA_ENDPOINT: [
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmExposPubuseAreaPk="GENERAL-1",
+                    pngtypGbNm="201호",
+                    flrGbCdNm="지상",
+                    flrNo="2",
+                    exposPubuseGbCd="1",
+                    exposPubuseGbCdNm="전유",
+                    etcPurps="다가구주택",
+                    area="31.25",
+                    crtnDay="20231204",
+                ),
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmExposPubuseAreaPk="GENERAL-2",
+                    pngtypGbNm="201호",
+                    flrGbCdNm="지상",
+                    flrNo="2",
+                    exposPubuseGbCd="2",
+                    exposPubuseGbCdNm="공용",
+                    area="4.5",
+                ),
+            ],
+            PERMIT_FLOOR_ENDPOINT: [
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmDongOulnPk="DONG-1",
+                    mgmFlrOulnPk="FLOOR-2",
+                    bldNm="주건축물",
+                    flrGbCdNm="지상",
+                    flrNo="2",
+                    mainPurpsCdNm="단독주택",
+                    strctCdNm="철근콘크리트구조",
+                    flrArea="98.5",
+                )
+            ],
+            PERMIT_PARCEL_ENDPOINT: [
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    mgmDongOulnPk="DONG-1",
+                    mgmPlatPlcPk="PARCEL-1",
+                    platPlc="수원시 영화동 396-30",
+                    reprYn="Y",
+                    relJibunNm="영화동 396-31",
+                    mainDongGbCdNm="주동",
+                )
+            ],
+            PERMIT_HOUSING_TYPE_ENDPOINT: [
+                land_row(
+                    mgmPmsrgstPk="CASE-1",
+                    hstpGbCd="1",
+                    hstpGbCdNm="준주택(고시원)",
+                    silHoHhldCnt="3",
+                    silHoHhldArea="22.5",
+                )
+            ],
+        }
+    )
+
+    result = lookup_permit_households(
+        client,
+        LAND,
+        register_approval_dates=("20231204",),
+    )
+
+    case = result.cases[0]
+    assert case.matches_register_approval_date is True
+    assert case.units == ()
+    assert [item.area_pk for item in case.unassigned_areas] == [
+        "GENERAL-1",
+        "GENERAL-2",
+    ]
+    assert case.unassigned_areas[0].area == Decimal("31.25")
+    assert case.unassigned_areas[0].floor_name == "2층"
+    assert case.permit_floors[0].area == Decimal("98.5")
+    assert case.parcels[0].related_lot_name == "영화동 396-31"
+    assert case.housing_type_details[0].unit_count == 3
+    assert case.housing_type_details[0].unit_area == Decimal("22.5")
+
+
+def test_unassigned_area_without_pk_is_not_presented_as_a_household_area() -> None:
+    result = lookup_permit_households(
+        MockClient(
+            {
+                PERMIT_BASIS_ENDPOINT: [land_row(mgmPmsrgstPk="CASE-1")],
+                PERMIT_GENERAL_AREA_ENDPOINT: [
+                    land_row(
+                        mgmPmsrgstPk="CASE-1",
+                        pngtypGbNm="301호",
+                        exposPubuseGbCd="1",
+                        area="99",
+                    )
+                ],
+            }
+        ),
+        LAND,
+    )
+
+    assert result.cases[0].unassigned_areas == ()
+    assert any("인허가 전유공용면적 PK가 없는" in item for item in result.warnings)
+
+
+def test_metadata_only_area_duplicates_keep_the_latest_collection_row() -> None:
+    common = {
+        "mgmPmsrgstPk": "CASE-1",
+        "mgmExposPubuseAreaPk": "GENERAL-1",
+        "pngtypGbNm": "201호",
+        "flrNo": "2",
+        "exposPubuseGbCd": "1",
+        "area": "31.25",
+    }
+    result = lookup_permit_households(
+        MockClient(
+            {
+                PERMIT_BASIS_ENDPOINT: [land_row(mgmPmsrgstPk="CASE-1")],
+                PERMIT_GENERAL_AREA_ENDPOINT: [
+                    land_row(**common, rnum="1", crtnDay="20231204"),
+                    land_row(**common, rnum="2", crtnDay="20240105"),
+                ],
+            }
+        ),
+        LAND,
+    )
+
+    assert len(result.cases[0].unassigned_areas) == 1
+    assert result.cases[0].unassigned_areas[0].source_as_of == "20240105"
+    assert not any("서로 다른 값으로 중복" in item for item in result.warnings)

@@ -9,8 +9,13 @@ from streamlit.testing.v1 import AppTest
 from app import PERMIT_LOOKUP_STATE_KEY, SearchOutcome
 from src.address import LandKey, ParsedAddress
 from src.permit_lookup import (
+    PermitAreaCategory,
     PermitCaseReference,
+    PermitEndpointStats,
+    PermitFloorReference,
     PermitHouseholdReference,
+    PermitParcelReference,
+    PermitUnassignedAreaReference,
     PermitUnitReference,
 )
 
@@ -107,6 +112,79 @@ def _reference(*cases: PermitCaseReference) -> PermitHouseholdReference:
     )
 
 
+def _precision_fallback_case() -> PermitCaseReference:
+    return PermitCaseReference(
+        case_pk="CURRENT",
+        building_name="영화동 다가구",
+        application_type="신축",
+        permit_date="20220705",
+        use_approval_date="20190902",
+        source_as_of="20231205",
+        expected_family_count=6,
+        expected_household_count=None,
+        housing_types=(),
+        matches_register_approval_date=True,
+        units=(),
+        unassigned_areas=(
+            PermitUnassignedAreaReference(
+                case_pk="CURRENT",
+                area_pk="AREA-1",
+                plan_name="201호",
+                floor_group_name="지상",
+                floor_number=2,
+                category=PermitAreaCategory.EXCLUSIVE,
+                purpose_name="단독주택",
+                other_purpose="다가구주택",
+                area=Decimal("31.25"),
+                source_as_of="20231205",
+            ),
+        ),
+        permit_floors=(
+            PermitFloorReference(
+                case_pk="CURRENT",
+                floor_pk="FLOOR-2",
+                dong_pk="DONG-1",
+                building_name="주건축물",
+                floor_group_name="지상",
+                floor_number=2,
+                purpose_name="단독주택",
+                structure_name="철근콘크리트구조",
+                area=Decimal("98.5"),
+                source_as_of="20231205",
+            ),
+        ),
+        parcels=(
+            PermitParcelReference(
+                case_pk="CURRENT",
+                parcel_pk="PARCEL-1",
+                dong_pk="DONG-1",
+                lot_address="수원시 영화동 396-30",
+                is_representative="Y",
+                related_lot_name="영화동 396-31",
+                main_building_name="주동",
+                source_as_of="20231205",
+            ),
+        ),
+    )
+
+
+def _precision_reference(case: PermitCaseReference) -> PermitHouseholdReference:
+    return PermitHouseholdReference(
+        land_key=LAND,
+        cases=(case,),
+        unlinked_unit_count=0,
+        orphan_area_count=0,
+        endpoint_stats=(
+            PermitEndpointStats("getApBasisOulnInfo", 1, 1, 1, 0, 0),
+            PermitEndpointStats("getApHoOulnInfo", 0, 0, 0, 0, 0),
+            PermitEndpointStats("getApExposPubuseAreaInfo", 1, 1, 1, 0, 0),
+            PermitEndpointStats("getApFlrOulnInfo", 1, 1, 1, 0, 0),
+        ),
+        warnings=(),
+        source_as_of="20231205",
+    )
+
+
 def _permit_state(
     *,
     reference: PermitHouseholdReference | None = None,
@@ -199,6 +277,53 @@ def test_matching_case_is_primary_and_other_history_is_unconfirmed() -> None:
     assert len(app.dataframe) == 2
     assert app.dataframe[0].value.loc[0, "전유면적(㎡)"] == "31.25"
     assert app.dataframe[1].value.loc[0, "전유면적(㎡)"] == "22.5"
+
+
+def test_precision_fallback_keeps_non_household_areas_visibly_separate() -> None:
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.session_state["search_outcome"] = _base_outcome()
+    app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(
+        reference=_precision_reference(_precision_fallback_case())
+    )
+    app.run()
+
+    assert not app.exception
+    rendered = _rendered_text(app)
+    assert "공개 API 채택 행: 기본 1건 · 호 0건 · 비호별 면적 1건 · 층 1건" in rendered
+    assert "호 PK가 없는 인허가 전유·공용면적 1건" in rendered
+    assert "현재 가구에 확정 배정하거나 호별면적과 합산하지 않습니다" in rendered
+    assert "정확한 가구별 전용면적은 공개 API에 없는 별지 제9호" in rendered
+    assert any(item.label == "3단계 · 인허가 층별면적(호 배정 불가)" for item in app.expander)
+    assert any(item.label == "인허가 대지위치·관련지번" for item in app.expander)
+    assert any(item.label == "공개 API 원문·지번검증 건수" for item in app.expander)
+    assert len(app.dataframe) == 4
+    assert app.dataframe[0].value.loc[0, "원문 수신"] == 1
+    assert app.dataframe[1].value.loc[0, "평형구분명(원문)"] == "201호"
+    assert app.dataframe[1].value.loc[0, "면적(㎡)"] == "31.25"
+
+
+def test_raw_basis_rows_rejected_by_land_validation_are_not_reported_as_zero() -> None:
+    reference = PermitHouseholdReference(
+        land_key=LAND,
+        cases=(),
+        unlinked_unit_count=0,
+        orphan_area_count=0,
+        endpoint_stats=(
+            PermitEndpointStats("getApBasisOulnInfo", 2, 0, 0, 2, 0),
+        ),
+        warnings=("요청 지번과 정확히 일치하지 않는 2개 행을 제외했습니다.",),
+        source_as_of=None,
+    )
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.session_state["search_outcome"] = _base_outcome()
+    app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(reference=reference)
+    app.run()
+
+    assert not app.exception
+    rendered = _rendered_text(app)
+    assert "기본개요 원문 2건을 받았지만" in rendered
+    assert "지번 5개 항목 검증을 통과한 행이 없습니다" in rendered
+    assert "기본개요 원문을 0건 반환" not in rendered
 
 
 def test_no_approval_date_match_marks_every_case_unconfirmed() -> None:

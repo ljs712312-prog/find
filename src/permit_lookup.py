@@ -20,15 +20,21 @@ from .address import LandKey
 
 PERMIT_BASIS_ENDPOINT = "getApBasisOulnInfo"
 PERMIT_DONG_ENDPOINT = "getApDongOulnInfo"
+PERMIT_FLOOR_ENDPOINT = "getApFlrOulnInfo"
 PERMIT_HOUSEHOLD_ENDPOINT = "getApHoOulnInfo"
+PERMIT_GENERAL_AREA_ENDPOINT = "getApExposPubuseAreaInfo"
 PERMIT_HOUSEHOLD_AREA_ENDPOINT = "getApHoExposPubuseAreaInfo"
+PERMIT_PARCEL_ENDPOINT = "getApPlatPlcInfo"
 PERMIT_HOUSING_TYPE_ENDPOINT = "getApHsTpInfo"
 
 PERMIT_LOOKUP_ENDPOINTS = (
     PERMIT_BASIS_ENDPOINT,
     PERMIT_DONG_ENDPOINT,
+    PERMIT_FLOOR_ENDPOINT,
     PERMIT_HOUSEHOLD_ENDPOINT,
+    PERMIT_GENERAL_AREA_ENDPOINT,
     PERMIT_HOUSEHOLD_AREA_ENDPOINT,
+    PERMIT_PARCEL_ENDPOINT,
     PERMIT_HOUSING_TYPE_ENDPOINT,
 )
 
@@ -123,6 +129,70 @@ class PermitUnitReference:
 
 
 @dataclass(frozen=True, slots=True)
+class PermitUnassignedAreaReference:
+    """Permit area component without an official household foreign key."""
+
+    case_pk: str
+    area_pk: str
+    plan_name: str | None
+    floor_group_name: str | None
+    floor_number: int | None
+    category: PermitAreaCategory
+    purpose_name: str | None
+    other_purpose: str | None
+    area: Decimal | None
+    source_as_of: str | None
+
+    @property
+    def floor_name(self) -> str | None:
+        if self.floor_number is not None:
+            return f"{self.floor_number}층"
+        return self.floor_group_name
+
+
+@dataclass(frozen=True, slots=True)
+class PermitFloorReference:
+    case_pk: str
+    floor_pk: str
+    dong_pk: str | None
+    building_name: str | None
+    floor_group_name: str | None
+    floor_number: int | None
+    purpose_name: str | None
+    structure_name: str | None
+    area: Decimal | None
+    source_as_of: str | None
+
+    @property
+    def floor_name(self) -> str | None:
+        if self.floor_number is not None:
+            return f"{self.floor_number}층"
+        return self.floor_group_name
+
+
+@dataclass(frozen=True, slots=True)
+class PermitParcelReference:
+    case_pk: str
+    parcel_pk: str
+    dong_pk: str | None
+    lot_address: str | None
+    is_representative: str | None
+    related_lot_name: str | None
+    main_building_name: str | None
+    source_as_of: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PermitHousingTypeReference:
+    case_pk: str
+    type_code: str | None
+    type_name: str | None
+    unit_count: int | None
+    unit_area: Decimal | None
+    source_as_of: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class PermitCaseReference:
     case_pk: str
     building_name: str | None
@@ -135,6 +205,10 @@ class PermitCaseReference:
     housing_types: tuple[str, ...]
     matches_register_approval_date: bool
     units: tuple[PermitUnitReference, ...]
+    unassigned_areas: tuple[PermitUnassignedAreaReference, ...] = ()
+    permit_floors: tuple[PermitFloorReference, ...] = ()
+    parcels: tuple[PermitParcelReference, ...] = ()
+    housing_type_details: tuple[PermitHousingTypeReference, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +384,84 @@ def _component(row: Mapping[str, Any]) -> PermitAreaComponent:
     )
 
 
+def _unassigned_area_component(
+    row: Mapping[str, Any],
+    case_pk: str,
+) -> PermitUnassignedAreaReference:
+    category = _classify_area(row)
+    if category is None:
+        raise PermitLookupDataError("전유·공용 코드와 명칭이 충돌하는 면적 행입니다.")
+    area_pk = _text(row, "mgmExposPubuseAreaPk")
+    if area_pk is None:
+        raise PermitLookupDataError("관리전유공용면적 PK가 없는 행입니다.")
+    return PermitUnassignedAreaReference(
+        case_pk=case_pk,
+        area_pk=area_pk,
+        plan_name=_text(row, "pngtypGbNm"),
+        floor_group_name=_text(row, "flrGbCdNm"),
+        floor_number=_integer(row.get("flrNo")),
+        category=category,
+        purpose_name=_text(row, "mainPurpsCdNm"),
+        other_purpose=_text(row, "etcPurps"),
+        area=_decimal(row.get("area")),
+        source_as_of=_text(row, "crtnDay"),
+    )
+
+
+def _safe_pk_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    pk_field: str,
+    label: str,
+) -> tuple[list[Mapping[str, Any]], tuple[str, ...]]:
+    """Reject rows that cannot be identified or conflict on one official PK."""
+
+    grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    missing_count = 0
+    for row in rows:
+        row_pk = _text(row, pk_field)
+        if row_pk is None:
+            missing_count += 1
+        else:
+            grouped[row_pk].append(row)
+
+    safe: list[Mapping[str, Any]] = []
+    warnings: list[str] = []
+    if missing_count:
+        warnings.append(f"{label} PK가 없는 {missing_count}개 행을 제외했습니다.")
+    for row_pk, grouped_rows in grouped.items():
+        if len(grouped_rows) == 1:
+            safe.append(grouped_rows[0])
+            continue
+
+        # The gateway may repeat the same business row with a different page
+        # sequence or collection date.  These metadata-only variants are not
+        # a data conflict; keep the latest one.  Any other difference remains
+        # ambiguous and is excluded rather than arbitrarily selected.
+        payloads = {
+            _freeze(
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"rnum", "crtnDay"}
+                }
+            )
+            for row in grouped_rows
+        }
+        if len(payloads) == 1:
+            safe.append(
+                max(
+                    grouped_rows,
+                    key=lambda row: (_text(row, "crtnDay") or "", repr(_freeze(row))),
+                )
+            )
+            continue
+        warnings.append(
+            f"{label} PK {row_pk}가 서로 다른 값으로 중복되어 제외했습니다."
+        )
+    return safe, tuple(warnings)
+
+
 def _safe_area_rows(
     unit_pk: str,
     case_pk: str,
@@ -452,6 +604,90 @@ def lookup_permit_households(
         if dong_pk:
             dong_by_pk[dong_pk].append(row)
 
+    unassigned_areas_by_case: dict[
+        str, list[PermitUnassignedAreaReference]
+    ] = defaultdict(list)
+    safe_general_area_rows, general_area_warnings = _safe_pk_rows(
+        rows_by_endpoint[PERMIT_GENERAL_AREA_ENDPOINT],
+        pk_field="mgmExposPubuseAreaPk",
+        label="인허가 전유공용면적",
+    )
+    warnings.extend(general_area_warnings)
+    for row in safe_general_area_rows:
+        case_pk = _text(row, "mgmPmsrgstPk")
+        if case_pk is None or case_pk not in basis_by_case:
+            warnings.append(
+                "기본개요에 연결되지 않는 인허가 전유공용면적 행을 제외했습니다."
+            )
+            continue
+        if _classify_area(row) is None:
+            warnings.append(
+                f"인허가 이력 {case_pk}의 전유·공용 코드와 명칭이 충돌하는 "
+                "면적 행을 제외했습니다."
+            )
+            continue
+        unassigned_areas_by_case[case_pk].append(
+            _unassigned_area_component(row, case_pk)
+        )
+
+    permit_floors_by_case: dict[str, list[PermitFloorReference]] = defaultdict(list)
+    safe_floor_rows, floor_warnings = _safe_pk_rows(
+        rows_by_endpoint[PERMIT_FLOOR_ENDPOINT],
+        pk_field="mgmFlrOulnPk",
+        label="인허가 층별개요",
+    )
+    warnings.extend(floor_warnings)
+    for row in safe_floor_rows:
+        case_pk = _text(row, "mgmPmsrgstPk")
+        if case_pk is None or case_pk not in basis_by_case:
+            warnings.append("기본개요에 연결되지 않는 인허가 층별개요 행을 제외했습니다.")
+            continue
+        floor_pk = _text(row, "mgmFlrOulnPk")
+        if floor_pk is None:
+            continue
+        permit_floors_by_case[case_pk].append(
+            PermitFloorReference(
+                case_pk=case_pk,
+                floor_pk=floor_pk,
+                dong_pk=_text(row, "mgmDongOulnPk"),
+                building_name=_text(row, "bldNm"),
+                floor_group_name=_text(row, "flrGbCdNm"),
+                floor_number=_integer(row.get("flrNo")),
+                purpose_name=_text(row, "mainPurpsCdNm"),
+                structure_name=_text(row, "strctCdNm"),
+                area=_decimal(row.get("flrArea")),
+                source_as_of=_text(row, "crtnDay"),
+            )
+        )
+
+    parcels_by_case: dict[str, list[PermitParcelReference]] = defaultdict(list)
+    safe_parcel_rows, parcel_warnings = _safe_pk_rows(
+        rows_by_endpoint[PERMIT_PARCEL_ENDPOINT],
+        pk_field="mgmPlatPlcPk",
+        label="인허가 대지위치",
+    )
+    warnings.extend(parcel_warnings)
+    for row in safe_parcel_rows:
+        case_pk = _text(row, "mgmPmsrgstPk")
+        if case_pk is None or case_pk not in basis_by_case:
+            warnings.append("기본개요에 연결되지 않는 인허가 대지위치 행을 제외했습니다.")
+            continue
+        parcel_pk = _text(row, "mgmPlatPlcPk")
+        if parcel_pk is None:
+            continue
+        parcels_by_case[case_pk].append(
+            PermitParcelReference(
+                case_pk=case_pk,
+                parcel_pk=parcel_pk,
+                dong_pk=_text(row, "mgmDongOulnPk"),
+                lot_address=_text(row, "platPlc"),
+                is_representative=_text(row, "reprYn"),
+                related_lot_name=_text(row, "relJibunNm"),
+                main_building_name=_text(row, "mainDongGbCdNm"),
+                source_as_of=_text(row, "crtnDay"),
+            )
+        )
+
     area_by_unit: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     orphan_area_count = 0
     for row in rows_by_endpoint[PERMIT_HOUSEHOLD_AREA_ENDPOINT]:
@@ -532,11 +768,25 @@ def lookup_permit_households(
         )
 
     housing_types_by_case: dict[str, list[str]] = defaultdict(list)
+    housing_type_details_by_case: dict[
+        str, list[PermitHousingTypeReference]
+    ] = defaultdict(list)
     for row in rows_by_endpoint[PERMIT_HOUSING_TYPE_ENDPOINT]:
         case_pk = _text(row, "mgmPmsrgstPk")
         label = _text(row, "hstpGbCdNm")
         if case_pk and label and label not in housing_types_by_case[case_pk]:
             housing_types_by_case[case_pk].append(label)
+        if case_pk and case_pk in basis_by_case:
+            housing_type_details_by_case[case_pk].append(
+                PermitHousingTypeReference(
+                    case_pk=case_pk,
+                    type_code=_text(row, "hstpGbCd"),
+                    type_name=label,
+                    unit_count=_integer(row.get("silHoHhldCnt")),
+                    unit_area=_decimal(row.get("silHoHhldArea")),
+                    source_as_of=_text(row, "crtnDay"),
+                )
+            )
 
     approval_dates = {
         str(value).strip()
@@ -576,6 +826,48 @@ def lookup_permit_households(
                     use_approval_date and use_approval_date in approval_dates
                 ),
                 units=units,
+                unassigned_areas=tuple(
+                    sorted(
+                        unassigned_areas_by_case.get(case_pk, ()),
+                        key=lambda item: (
+                            item.plan_name or "",
+                            item.floor_number
+                            if item.floor_number is not None
+                            else -10_000,
+                            {
+                                PermitAreaCategory.EXCLUSIVE: 0,
+                                PermitAreaCategory.COMMON: 1,
+                                PermitAreaCategory.OTHER: 2,
+                            }[item.category],
+                            item.area_pk,
+                        ),
+                    )
+                ),
+                permit_floors=tuple(
+                    sorted(
+                        permit_floors_by_case.get(case_pk, ()),
+                        key=lambda item: (
+                            item.building_name or "",
+                            item.floor_number
+                            if item.floor_number is not None
+                            else -10_000,
+                            item.floor_pk,
+                        ),
+                    )
+                ),
+                parcels=tuple(
+                    sorted(
+                        parcels_by_case.get(case_pk, ()),
+                        key=lambda item: (
+                            0 if item.is_representative in {"Y", "1"} else 1,
+                            item.lot_address or "",
+                            item.parcel_pk,
+                        ),
+                    )
+                ),
+                housing_type_details=tuple(
+                    housing_type_details_by_case.get(case_pk, ())
+                ),
             )
         )
 
@@ -595,16 +887,23 @@ def lookup_permit_households(
 __all__ = [
     "PERMIT_BASIS_ENDPOINT",
     "PERMIT_DONG_ENDPOINT",
+    "PERMIT_FLOOR_ENDPOINT",
+    "PERMIT_GENERAL_AREA_ENDPOINT",
     "PERMIT_HOUSEHOLD_AREA_ENDPOINT",
     "PERMIT_HOUSEHOLD_ENDPOINT",
     "PERMIT_HOUSING_TYPE_ENDPOINT",
+    "PERMIT_PARCEL_ENDPOINT",
     "PERMIT_LOOKUP_ENDPOINTS",
     "PermitAreaCategory",
     "PermitAreaComponent",
     "PermitCaseReference",
     "PermitEndpointStats",
+    "PermitFloorReference",
     "PermitHouseholdReference",
+    "PermitHousingTypeReference",
     "PermitLookupDataError",
+    "PermitParcelReference",
+    "PermitUnassignedAreaReference",
     "PermitUnitReference",
     "lookup_permit_households",
 ]

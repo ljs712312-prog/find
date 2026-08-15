@@ -34,6 +34,7 @@ from src.gyeonggi_portal import (
 from src.legacy import LegacyBuilding, load_legacy_frames, lookup_legacy
 from src.lookup import RegisterSnapshot, TitleSummary, UnitSummary, lookup_register
 from src.permit_lookup import (
+    PermitAreaCategory,
     PermitCaseReference,
     PermitHouseholdReference,
     PermitLookupDataError,
@@ -51,9 +52,13 @@ from src.vworld import (
 # hashes this argument into each entry, so a hot deploy cannot keep serving a
 # snapshot produced by an older register-mapping rule.
 LOOKUP_CACHE_SCHEMA = "2026-08-14.1"
-PERMIT_CACHE_SCHEMA = "2026-08-14.1"
+PERMIT_CACHE_SCHEMA = "2026-08-15.1"
 GOVERNMENT24_REGISTER_URL = (
     "https://www.gov.kr/mw/AA020InfoCappView.do?CappBizCD=15000000098"
+)
+EAIS_REGISTER_URL = "https://www.eais.go.kr/?actionFlag=archCprtrList"
+PUBLIC_DATA_REQUEST_URL = (
+    "https://www.data.go.kr/tcs/dor/insertDataOfferReqstProcssView.do"
 )
 VIOLATION_LOOKUP_STATE_KEY = "violation_lookup"
 PERMIT_LOOKUP_STATE_KEY = "permit_lookup"
@@ -382,6 +387,124 @@ def _permit_unit_table(case: PermitCaseReference) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _permit_unassigned_area_table(case: PermitCaseReference) -> pd.DataFrame:
+    category_names = {
+        PermitAreaCategory.EXCLUSIVE: "전유",
+        PermitAreaCategory.COMMON: "공용",
+        PermitAreaCategory.OTHER: "기타/미분류",
+    }
+    return pd.DataFrame(
+        [
+            {
+                "평형구분명(원문)": item.plan_name or "-",
+                "층": item.floor_name or "-",
+                "구분": category_names[item.category],
+                "용도": item.other_purpose or item.purpose_name or "-",
+                "면적(㎡)": _decimal_text(item.area, suffix="").strip(),
+            }
+            for item in case.unassigned_areas
+        ]
+    )
+
+
+def _permit_floor_reference_table(case: PermitCaseReference) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "건물·동": item.building_name or "-",
+                "층": item.floor_name or "-",
+                "용도": item.purpose_name or "-",
+                "구조": item.structure_name or "-",
+                "층면적(㎡)": _decimal_text(item.area, suffix="").strip(),
+            }
+            for item in case.permit_floors
+        ]
+    )
+
+
+def _permit_parcel_table(case: PermitCaseReference) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "대지위치": item.lot_address or "-",
+                "대표 여부": item.is_representative or "-",
+                "관련지번": item.related_lot_name or "-",
+                "주동 구분": item.main_building_name or "-",
+            }
+            for item in case.parcels
+        ]
+    )
+
+
+def _permit_housing_type_table(case: PermitCaseReference) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "주택유형": item.type_name or item.type_code or "-",
+                "실·호·세대수": item.unit_count
+                if item.unit_count is not None
+                else "-",
+                "유형 면적(㎡)": _decimal_text(item.unit_area, suffix="").strip(),
+            }
+            for item in case.housing_type_details
+        ]
+    )
+
+
+def _permit_endpoint_caption(reference: PermitHouseholdReference) -> str:
+    labels = {
+        "getApBasisOulnInfo": "기본",
+        "getApDongOulnInfo": "동",
+        "getApFlrOulnInfo": "층",
+        "getApHoOulnInfo": "호",
+        "getApExposPubuseAreaInfo": "비호별 면적",
+        "getApHoExposPubuseAreaInfo": "호별 면적",
+        "getApPlatPlcInfo": "대지위치",
+        "getApHsTpInfo": "주택유형",
+    }
+    counts = " · ".join(
+        f"{labels.get(item.endpoint, item.endpoint)} {item.unique_count}건"
+        for item in reference.endpoint_stats
+    )
+    return f"공개 API 채택 행: {counts}" if counts else "공개 API 채택 행 없음"
+
+
+def _permit_endpoint_table(reference: PermitHouseholdReference) -> pd.DataFrame:
+    labels = {
+        "getApBasisOulnInfo": "기본",
+        "getApDongOulnInfo": "동",
+        "getApFlrOulnInfo": "층",
+        "getApHoOulnInfo": "호",
+        "getApExposPubuseAreaInfo": "비호별 면적",
+        "getApHoExposPubuseAreaInfo": "호별 면적",
+        "getApPlatPlcInfo": "대지위치",
+        "getApHsTpInfo": "주택유형",
+    }
+    return pd.DataFrame(
+        [
+            {
+                "자료": labels.get(item.endpoint, item.endpoint),
+                "원문 수신": item.received_count,
+                "지번 일치": item.matched_count,
+                "채택": item.unique_count,
+                "지번 불일치·누락": item.rejected_count,
+                "완전 중복": item.duplicate_count,
+            }
+            for item in reference.endpoint_stats
+        ]
+    )
+
+
+def _permit_endpoint_stat(
+    reference: PermitHouseholdReference,
+    endpoint: str,
+):
+    return next(
+        (item for item in reference.endpoint_stats if item.endpoint == endpoint),
+        None,
+    )
+
+
 def _permit_case_label(
     case: PermitCaseReference,
     index: int,
@@ -478,17 +601,58 @@ def _render_permit_case_details(case: PermitCaseReference) -> None:
         )
         or "인허가 이력 상세정보 없음"
     )
-    st.dataframe(
-        _permit_unit_table(case),
-        hide_index=True,
-        width="stretch",
-    )
+    if case.units:
+        st.markdown("##### 1단계 · 호 관리 PK로 연결된 면적")
+        st.dataframe(
+            _permit_unit_table(case),
+            hide_index=True,
+            width="stretch",
+        )
+    if case.unassigned_areas:
+        st.markdown("##### 2단계 · 호 PK가 없는 인허가 전유·공용면적")
+        st.warning(
+            "면적명·호 표기와 층은 공개 원문 그대로입니다. 호별개요 PK가 없어 "
+            "현재 가구에 확정 배정하거나 호별면적과 합산하지 않습니다."
+        )
+        st.dataframe(
+            _permit_unassigned_area_table(case),
+            hide_index=True,
+            width="stretch",
+        )
+    if case.permit_floors:
+        with st.expander("3단계 · 인허가 층별면적(호 배정 불가)"):
+            st.caption(
+                "층별 총량 검산용입니다. 가구 수로 나누어 호별면적을 추정하지 않습니다."
+            )
+            st.dataframe(
+                _permit_floor_reference_table(case),
+                hide_index=True,
+                width="stretch",
+            )
+    if case.parcels:
+        with st.expander("인허가 대지위치·관련지번"):
+            st.dataframe(
+                _permit_parcel_table(case),
+                hide_index=True,
+                width="stretch",
+            )
+    if case.housing_type_details:
+        with st.expander("준주택·도시형생활주택 유형정보"):
+            st.caption(
+                "이 표는 고시원·오피스텔·도시형생활주택 등의 유형자료이며, "
+                "일반 다가구 호별면적 대체값이 아닙니다."
+            )
+            st.dataframe(
+                _permit_housing_type_table(case),
+                hide_index=True,
+                width="stretch",
+            )
     expected = (
         case.expected_family_count
         if case.expected_family_count is not None
         else case.expected_household_count
     )
-    if expected is not None and expected != len(case.units):
+    if case.units and expected is not None and expected != len(case.units):
         st.warning(
             f"인허가 기본개요의 가구 수({expected})와 "
             f"연결된 호별 행 수({len(case.units)})가 다릅니다."
@@ -506,8 +670,8 @@ def _render_unconfirmed_permit_cases(
         expanded=False,
     ):
         st.caption(
-            "아래 자료는 같은 지번의 인허가 후보일 뿐 현재 건물의 호별면적으로 "
-            "확정할 수 없습니다."
+            "아래 자료는 같은 지번의 인허가 후보일 뿐 현재 건물의 호별·층별 "
+            "확정자료로 볼 수 없습니다."
         )
         for position, (index, case) in enumerate(cases):
             if position:
@@ -555,13 +719,62 @@ def _render_permit_reference(outcome: SearchOutcome) -> None:
         st.info("건축인허가 참고조회를 실행하지 못했습니다.")
         return
 
-    cases = tuple(case for case in reference.cases if case.units)
+    st.caption(_permit_endpoint_caption(reference))
+    if reference.endpoint_stats:
+        with st.expander("공개 API 원문·지번검증 건수"):
+            st.dataframe(
+                _permit_endpoint_table(reference),
+                hide_index=True,
+                width="stretch",
+            )
+    cases = reference.cases
+    exact_unit_count = sum(len(case.units) for case in cases)
+    unassigned_area_count = sum(len(case.unassigned_areas) for case in cases)
+    permit_floor_count = sum(len(case.permit_floors) for case in cases)
     if not cases:
-        st.info(
-            "공개 건축인허가 자료에서도 이 지번에 연결되는 호별면적 행을 확인하지 못했습니다. "
-            "이는 0㎡라는 뜻이 아닙니다."
-        )
+        basis_stats = _permit_endpoint_stat(reference, "getApBasisOulnInfo")
+        if basis_stats is not None and basis_stats.received_count == 0:
+            st.info(
+                "공개 건축인허가 API가 기본개요 원문을 0건 반환했습니다. "
+                "이는 면적이 0㎡라는 뜻이 아닙니다."
+            )
+        elif basis_stats is not None and basis_stats.matched_count == 0:
+            st.warning(
+                f"기본개요 원문 {basis_stats.received_count}건을 받았지만 정확한 "
+                "지번 5개 항목 검증을 통과한 행이 없습니다. 주소 필드 누락·불일치 "
+                "가능성을 위 진단표에서 확인해 주세요."
+            )
+        elif basis_stats is not None:
+            st.warning(
+                f"기본개요 지번 일치 행 {basis_stats.matched_count}건은 있으나 "
+                "관리허가대장 PK로 안전하게 구성할 수 있는 이력이 없습니다."
+            )
+        else:
+            st.info(
+                "공개 건축인허가 자료에서 안전하게 연결할 기본개요를 확인하지 "
+                "못했습니다. 이는 면적이 0㎡라는 뜻이 아닙니다."
+            )
     else:
+        if exact_unit_count:
+            st.success(
+                f"호 관리 PK로 연결된 호별자료 {exact_unit_count}건을 확인했습니다."
+            )
+        elif unassigned_area_count:
+            st.warning(
+                "호별개요·호별면적 PK 연결은 0건이지만, 호 PK가 없는 인허가 "
+                f"전유·공용면적 {unassigned_area_count}건을 원문 형태로 표시합니다."
+            )
+        elif permit_floor_count:
+            st.info(
+                "호별개요와 전유·공용면적은 0건입니다. 인허가 층별면적 "
+                f"{permit_floor_count}건만 호 배정이 불가능한 참고값으로 표시합니다."
+            )
+        else:
+            st.info(
+                "인허가 기본개요는 있으나 호별개요·호별면적·층별면적 공개 행은 "
+                "모두 0건입니다. 이는 면적이 0㎡라는 뜻이 아닙니다."
+            )
+
         approval_dates = frozenset(_permit_approval_dates(outcome))
         indexed_cases = tuple(enumerate(cases))
         current_cases = tuple(
@@ -607,6 +820,14 @@ def _render_permit_reference(outcome: SearchOutcome) -> None:
         _render_unconfirmed_permit_cases(
             other_cases if current_cases else indexed_cases
         )
+
+    if not exact_unit_count:
+        st.caption(
+            "정확한 가구별 전용면적은 공개 API에 없는 별지 제9호 원본에서 확인해야 합니다."
+        )
+        with st.container(horizontal=True, gap="small"):
+            st.link_button("세움터 정확 대장 확인", EAIS_REGISTER_URL)
+            st.link_button("별지9 공공데이터 제공신청", PUBLIC_DATA_REQUEST_URL)
 
     st.caption(
         f"출처: 국토교통부 건축HUB 건축인허가정보 · "

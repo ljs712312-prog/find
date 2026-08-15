@@ -84,3 +84,14 @@ def test_permit_client_rejects_register_only_name_filters() -> None:
     client = BuildingPermitHubClient(KEY, session=FakeSession())
     with pytest.raises(BuildingHubValidationError):
         client.fetch_all("getApHoOulnInfo", LAND, hoNm="201호")
+
+
+def test_precision_fallback_endpoints_are_explicitly_allowed() -> None:
+    client = BuildingPermitHubClient(KEY, session=FakeSession(), max_retries=0)
+
+    for endpoint in (
+        "getApFlrOulnInfo",
+        "getApExposPubuseAreaInfo",
+        "getApPlatPlcInfo",
+    ):
+        assert client.fetch_all(endpoint, LAND) == [{"mgmPmsrgstPk": "CASE-1"}]
