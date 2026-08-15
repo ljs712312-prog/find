@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit.errors import StreamlitSecretNotFoundError
 
 from src.address import AddressParseError, LandKey, ParsedAddress, parse_address
@@ -1131,14 +1132,44 @@ def _render_intro() -> None:
     )
 
 
+def _set_korean_document_language() -> None:
+    """Prevent browser translation from mutating Streamlit's managed DOM."""
+
+    components.html(
+        """
+        <script>
+        try {
+          const doc = window.parent.document;
+          doc.documentElement.lang = "ko";
+          doc.documentElement.setAttribute("translate", "no");
+          doc.documentElement.classList.add("notranslate");
+          let meta = doc.head.querySelector('meta[name="google"]');
+          if (!meta) {
+            meta = doc.createElement("meta");
+            meta.name = "google";
+            doc.head.appendChild(meta);
+          }
+          meta.content = "notranslate";
+        } catch (_) {
+          // The visible app remains usable if a future sandbox blocks parent access.
+        }
+        </script>
+        """,
+        height=0,
+        scrolling=False,
+    )
+
+
 def render_app() -> None:
     st.set_page_config(
         page_title="원탑 건축물대장",
         page_icon="🏢",
         layout="centered",
     )
+    _set_korean_document_language()
     st.markdown(
         """
+        <meta name="google" content="notranslate">
         <style>
         .block-container {max-width: 920px; padding-top: 2.5rem; padding-bottom: 4rem;}
         h1 {text-align: center; letter-spacing: -0.04em;}
