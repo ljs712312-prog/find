@@ -1,5 +1,7 @@
 # BuildingHUB authenticated relay
 
+> **Recommended for zero-additional-cost operation:** use `relay/cloudflare-worker/`. It keeps the same Streamlit direct-first fallback contract, uses Cloudflare Workers Free, and requires no billed GCP project. The FastAPI/Cloud Run implementation below is retained as an optional alternative.
+
 This is a deliberately narrow FastAPI relay for the official BuildingHUB
 building-register service. It is intended to give the Streamlit Community
 Cloud app a Korean cloud egress route when direct connections to
@@ -173,17 +175,18 @@ the application authentication layer.
    The deploy command prints the relay URL; treat it as a server-side Streamlit
    setting, not a browser link.
 
-4. In Streamlit Community Cloud secrets, set only:
+4. In Streamlit Community Cloud secrets, add:
 
    ```toml
    BUILDING_HUB_RELAY_URL = "https://your-cloud-run-url"
    BUILDING_HUB_RELAY_HMAC_SECRET = "the-same-random-secret"
    ```
 
-   Do **not** set `DATA_GO_SERVICE_KEY` in Streamlit when the relay is active.
-   The Streamlit backend should sign calls and use the relay only after a
-   direct BuildingHUB transport failure; it must not forward the public-data
-   key, an arbitrary URL, or user-controlled headers.
+   Keep the existing `BUILDING_HUB_API_KEY` in Streamlit because the current
+   application is direct-first and only invokes the relay after a qualifying
+   transport failure. Do **not** set `DATA_GO_SERVICE_KEY` in Streamlit; that
+   secret belongs only on the relay. The Streamlit backend must not forward
+   the service key, an arbitrary URL, or user-controlled headers.
 
 The nonce cache is intentionally in process and has no data-store dependency.
 For more than one Cloud Run instance, multiple Uvicorn workers, or security
