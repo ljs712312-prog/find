@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 .streamlit/secrets.toml
 tmp/
+node_modules/
+relay/cloudflare-worker/worker-configuration.d.ts
+supabase/.temp/

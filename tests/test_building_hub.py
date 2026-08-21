@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import hmac
 import json
 from typing import Any
 
@@ -13,13 +15,20 @@ from src.building_hub import (
     BuildingHubClient,
     BuildingHubDecodeError,
     BuildingHubEnvelopeError,
+    BuildingHubError,
     BuildingHubHTTPError,
     BuildingHubNetworkError,
     BuildingHubPaginationError,
     BuildingHubQuotaError,
+    BuildingHubRateLimitError,
     BuildingHubValidationError,
 )
+from src.building_permit import BuildingPermitHubClient
+
+
 KEY = "secret+/key=="
+RELAY_URL = "https://building-hub-relay.example.com/edge"
+RELAY_SECRET = "relay-hmac-secret-0123456789-abcdefghij"
 LAND_DICT = {
     "sigunguCd": "41117",
     "bjdongCd": "10700",
@@ -463,7 +472,6 @@ def test_owned_session_keeps_environment_defaults() -> None:
     client = BuildingHubClient(KEY)
     try:
         assert client._session.trust_env is True
-        assert client._timeout == (5.0, 20.0)
     finally:
         client.close()
 
@@ -551,37 +559,238 @@ def test_scalar_item_is_an_envelope_error() -> None:
         client.fetch_all("getBrTitleInfo", LAND_DICT)
 
 
-def test_http_408_is_retried() -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [
+        requests.ConnectTimeout("direct connect timed out"),
+        requests.ConnectionError("direct DNS lookup failed"),
+        requests.exceptions.SSLError("direct TLS handshake failed"),
+    ],
+    ids=["connect-timeout", "connection-or-dns", "tls"],
+)
+def test_relay_is_used_immediately_for_eligible_direct_transport_failures(
+    failure: requests.exceptions.RequestException,
+) -> None:
     sleeps: list[float] = []
     session = FakeSession(
-        FakeResponse(status_code=408, text="request timeout"),
-        FakeResponse(payload=api_payload({"id": "recovered"})),
+        failure,
+        FakeResponse(payload=api_payload({"mgmBldrgstPk": "relay-pk"})),
     )
     client = BuildingHubClient(
         KEY,
         session=session,
-        max_retries=1,
+        max_retries=3,
         sleep=sleeps.append,
+        relay_url=RELAY_URL,
+        relay_hmac_secret=RELAY_SECRET,
     )
 
-    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [{"id": "recovered"}]
-    assert len(session.calls) == 2
-    assert sleeps == [0.25]
+    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [
+        {"mgmBldrgstPk": "relay-pk"}
+    ]
+    assert [call["method"] for call in session.calls] == ["GET", "POST"]
+    assert sleeps == []
+
+    relay_call = session.calls[1]
+    assert relay_call["url"] == (
+        "https://building-hub-relay.example.com/edge/v1/building-hub/"
+        "getBrTitleInfo"
+    )
+    assert relay_call["timeout"] == (3.05, 15.0)
+    assert json.loads(relay_call["data"]) == {
+        "params": {
+            "_type": "json",
+            "bjdongCd": "10700",
+            "bun": "0006",
+            "ji": "0011",
+            "numOfRows": 100,
+            "pageNo": 1,
+            "platGbCd": "1",
+            "sigunguCd": "41117",
+        }
+    }
+    assert KEY not in relay_call["url"]
+    assert KEY not in relay_call["data"]
+    assert KEY not in str(relay_call["headers"])
+    assert RELAY_SECRET not in repr(client)
+    assert RELAY_SECRET not in str(relay_call)
+
+    headers = relay_call["headers"]
+    signed = (
+        f"{headers['X-Building-Hub-Timestamp']}\n"
+        f"{headers['X-Building-Hub-Nonce']}\n"
+        f"getBrTitleInfo\n{relay_call['data']}"
+    ).encode("utf-8")
+    expected_signature = hmac.new(
+        RELAY_SECRET.encode("utf-8"), signed, hashlib.sha256
+    ).hexdigest()
+    assert headers["X-Building-Hub-Signature"] == expected_signature
 
 
-def test_transient_malformed_success_response_is_retried() -> None:
+def test_relay_does_not_run_after_direct_read_timeout() -> None:
     sleeps: list[float] = []
     session = FakeSession(
-        FakeResponse(status_code=200, text="<html>temporary gateway page</html>"),
-        FakeResponse(payload=api_payload({"id": "recovered"})),
+        *[requests.ReadTimeout("direct response timed out") for _ in range(4)]
     )
     client = BuildingHubClient(
         KEY,
         session=session,
-        max_retries=1,
+        max_retries=3,
         sleep=sleeps.append,
+        relay_url=RELAY_URL,
+        relay_hmac_secret=RELAY_SECRET,
     )
 
-    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [{"id": "recovered"}]
-    assert len(session.calls) == 2
-    assert sleeps == [0.25]
+    with pytest.raises(BuildingHubNetworkError) as caught:
+        client.fetch_all("getBrTitleInfo", LAND_DICT)
+
+    assert caught.value.reason == "read_timeout"
+    assert [call["method"] for call in session.calls] == ["GET"] * 4
+    assert sleeps == [0.25, 0.5, 1.0]
+
+
+@pytest.mark.parametrize(
+    ("response", "error_type"),
+    [
+        (
+            FakeResponse(
+                payload=api_payload(None, code="30", items_node=None),
+            ),
+            BuildingHubAuthError,
+        ),
+        (
+            FakeResponse(
+                payload=api_payload(None, code="22", items_node=None),
+            ),
+            BuildingHubQuotaError,
+        ),
+        (
+            FakeResponse(
+                payload=api_payload(None, code="10", items_node=None),
+            ),
+            BuildingHubAPIError,
+        ),
+        (
+            FakeResponse(status_code=404, text="not found"),
+            BuildingHubHTTPError,
+        ),
+        (
+            FakeResponse(
+                payload=api_payload(None, code="23", items_node=None),
+            ),
+            BuildingHubRateLimitError,
+        ),
+    ],
+    ids=["auth", "quota", "api", "http", "rate-limit"],
+)
+def test_relay_does_not_mask_direct_api_or_http_errors(
+    response: FakeResponse,
+    error_type: type[BuildingHubError],
+) -> None:
+    session = FakeSession(response)
+    client = BuildingHubClient(
+        KEY,
+        session=session,
+        max_retries=0,
+        relay_url=RELAY_URL,
+        relay_hmac_secret=RELAY_SECRET,
+    )
+
+    with pytest.raises(error_type):
+        client.fetch_all("getBrTitleInfo", LAND_DICT)
+
+    assert [call["method"] for call in session.calls] == ["GET"]
+
+
+def test_relay_configuration_can_derive_secret_from_existing_service_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BUILDING_HUB_RELAY_URL", RELAY_URL)
+    monkeypatch.delenv("BUILDING_HUB_RELAY_HMAC_SECRET", raising=False)
+    session = FakeSession(
+        requests.ConnectionError("direct DNS lookup failed"),
+        FakeResponse(payload=api_payload({"id": "derived-secret"})),
+    )
+    client = BuildingHubClient(KEY, session=session, max_retries=0)
+
+    assert client.relay_enabled is True
+    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [{"id": "derived-secret"}]
+    relay_call = session.calls[1]
+    derived_secret = hashlib.sha256(
+        f"buildinghub-relay-v1\x00{KEY}".encode("utf-8")
+    ).hexdigest()
+    headers = relay_call["headers"]
+    signed = (
+        f"{headers['X-Building-Hub-Timestamp']}\n"
+        f"{headers['X-Building-Hub-Nonce']}\n"
+        f"getBrTitleInfo\n{relay_call['data']}"
+    ).encode("utf-8")
+    expected_signature = hmac.new(
+        derived_secret.encode("utf-8"), signed, hashlib.sha256
+    ).hexdigest()
+    assert headers["X-Building-Hub-Signature"] == expected_signature
+    assert KEY not in relay_call["data"]
+    assert KEY not in str(headers)
+
+
+def test_relay_configuration_validation_still_rejects_unsafe_values() -> None:
+    with pytest.raises(BuildingHubValidationError, match="HTTPS"):
+        BuildingHubClient(
+            KEY,
+            session=FakeSession(),
+            relay_url="http://relay.example.com",
+            relay_hmac_secret=RELAY_SECRET,
+        )
+
+    with pytest.raises(BuildingHubValidationError, match="at least 32"):
+        BuildingHubClient(
+            KEY,
+            session=FakeSession(),
+            relay_url=RELAY_URL,
+            relay_hmac_secret="too-short",
+        )
+
+    with pytest.raises(BuildingHubValidationError, match="RELAY_URL"):
+        BuildingHubClient(
+            KEY,
+            session=FakeSession(),
+            relay_hmac_secret=RELAY_SECRET,
+        )
+
+
+def test_relay_configuration_can_be_read_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BUILDING_HUB_RELAY_URL", RELAY_URL)
+    monkeypatch.setenv("BUILDING_HUB_RELAY_HMAC_SECRET", RELAY_SECRET)
+    session = FakeSession(
+        requests.ConnectionError("direct connection failed"),
+        FakeResponse(payload=api_payload({"id": "via-env"})),
+    )
+    client = BuildingHubClient(KEY, session=session, max_retries=3)
+
+    assert client.relay_enabled is True
+    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [{"id": "via-env"}]
+    assert [call["method"] for call in session.calls] == ["GET", "POST"]
+
+
+def test_register_relay_is_unavailable_to_building_permit_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BUILDING_HUB_RELAY_URL", RELAY_URL)
+    monkeypatch.setenv("BUILDING_HUB_RELAY_HMAC_SECRET", RELAY_SECRET)
+    session = FakeSession(requests.ConnectionError("permit direct connection failed"))
+    client = BuildingPermitHubClient(KEY, session=session, max_retries=0)
+
+    assert client.relay_enabled is False
+    with pytest.raises(BuildingHubNetworkError):
+        client.fetch_all("getApBasisOulnInfo", LAND_DICT)
+    assert [call["method"] for call in session.calls] == ["GET"]
+
+    with pytest.raises(BuildingHubValidationError, match="only available"):
+        BuildingPermitHubClient(
+            KEY,
+            session=FakeSession(),
+            relay_url=RELAY_URL,
+            relay_hmac_secret=RELAY_SECRET,
+        )

@@ -52,6 +52,13 @@ BUILDING_HUB_API_KEY = "..."
 선택 secret:
 
 ```toml
+# 운영 중인 Supabase 서울 중계 URL은 src/relay_config.py에 기본값으로 지정되어
+# 있으므로 생략합니다. 다른 중계를 쓸 때만 덮어쓰세요.
+# BUILDING_HUB_RELAY_URL = "https://project.supabase.co/functions/v1/building-hub-relay"
+
+# 기존 배포와의 하위 호환용 명시적 HMAC secret. 새 무료 배포에는 불필요합니다.
+# BUILDING_HUB_RELAY_HMAC_SECRET = "long-random-secret"
+
 # 건축인허가 서비스가 별도 인증키를 쓰는 경우에만 지정합니다.
 # 생략하면 BUILDING_HUB_API_KEY를 재사용합니다.
 ARCH_PMS_HUB_API_KEY = "..."
@@ -61,14 +68,22 @@ VWORLD_DOMAIN = "won-top-finder-work.streamlit.app"
 
 키를 저장소, 로그, 오류 메시지 또는 화면에 출력하지 마세요.
 
-### 건축HUB 연결 방식
+### Streamlit Cloud 연결 중계
 
-건축물대장과 건축인허가정보는 공공데이터포털의 공식 HTTPS 주소에 직접
-연결합니다. 별도 중계 서버나 제3자 프록시는 사용하지 않습니다. 일시적인
-연결 실패·응답 지연·HTTP 408/429/5xx·손상 응답은 제한된 횟수만 자동
-재시도합니다. 공식 서버 연결 경로가 계속 실패하면 기존 수원 CSV 스냅샷을
-보조자료로 표시하며, API에서 받지 못한 호실면적이나 위반 여부를 추정하지
-않습니다.
+공식 건축HUB URL은 `https://apis.data.go.kr/1613000/BldRgstHubService`입니다.
+직접 연결이 지속적으로 `connect_timeout`으로 실패하는 배포 환경에서는
+현재 운영 배포는 무료 Supabase Edge Function을 서울 리전에서 사용합니다.
+앱은 먼저 공식 API에 직접 연결하고, TCP 연결·TLS·프록시 연결 실패에만 서명된 중계로 자동
+전환합니다. 인증·할당량·API 오류나 응답 지연에는 중계로 전환하지 않습니다.
+
+Supabase에는 `DATA_GO_SERVICE_KEY`만 secret으로 저장합니다. Streamlit은 기존
+`BUILDING_HUB_API_KEY`를 그대로 유지하며, 별도 HMAC secret 없이 같은 키에서
+도메인 분리된 서명키를 서버 내부적으로 파생합니다. API 키 원문은 중계 요청에
+포함되지 않습니다. 배포된 공개 URL은 `src/relay_config.py`에 들어 있어
+Streamlit Community Cloud의 Secrets 화면을 따로 수정하지 않아도 GitHub 재배포로
+반영됩니다. 함수 코드는 `supabase/functions/building-hub-relay/`에 있으며,
+`X-Region: ap-northeast-2`로 서울 실행을 요청합니다. Cloudflare Worker와 FastAPI
+구현은 장애 시 사용할 수 있는 대체 배포안으로 남겨 둡니다.
 
 ## 테스트
 
@@ -84,9 +99,6 @@ ruff check app.py src tests
 - 표제부를 먼저 확인한 뒤 층별·호실 등 상세 API가 일시 지연되면, 확인된
   표제부 결과는 표시하고 지연된 상세 항목만 경고로 구분합니다. 부분 결과는
   장기 캐시에 남기지 않아 다음 조회에서 자동 재시도합니다.
-- 성공한 직접 조회는 24시간 캐시해 공식 서버 호출량과 일시 장애 노출을
-  줄입니다. 연결 경로 장애가 확인되면 같은 조회의 남은 상세 호출을 생략해
-  화면 대기가 불필요하게 길어지지 않도록 합니다.
 - 집합건물 면적은 전유부 관리 PK로 전유공용면적을 결합하고, `전유`와
   `공용` 행을 각각 합산합니다.
 - 다가구 면적은 정확도에 따라 분리합니다. 1단계는 `관리허가대장PK →
@@ -104,3 +116,17 @@ ruff check app.py src tests
 - 경기부동산포털의 건축물 표시 여부는 지원되는 위반정보 API가 아니며,
   적법·위반 판정에 사용할 수 없습니다.
 - 이 앱의 결과는 공식 증명서가 아닙니다.
+
+## Streamlit Cloud 건축HUB 연결 장애: 무료 중계 경로
+
+Streamlit Community Cloud에서 `apis.data.go.kr` 직접 연결이 `connect_timeout`, DNS/connection, TLS 단계에서만 실패할 경우, 앱은 선택적으로 서명된 중계로 전환할 수 있습니다.
+
+추가 결제 없는 현재 운영 경로는 `supabase/functions/`의 Supabase Edge Function입니다. 기존 `BUILDING_HUB_API_KEY` 직접 호출이 항상 1순위이며, 중계는 네트워크 연결 장애 때만 사용됩니다. Cloudflare Worker와 `relay/`의 FastAPI 구현은 대체 배포 옵션입니다.
+
+Cloudflare 대체 배포가 필요한 경우에만 다음 부트스트랩 명령을 사용할 수 있습니다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/ljs712312-prog/find/main/scripts/bootstrap_cloudflare_worker.ps1' | iex"
+```
+
+Supabase 운영 URL은 이미 `src/relay_config.py`에 반영되어 있습니다.

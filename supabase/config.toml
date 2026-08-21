@@ -1,0 +1,2 @@
+[functions.building-hub-relay]
+verify_jwt = false
