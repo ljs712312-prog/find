@@ -23,6 +23,8 @@ import xml.etree.ElementTree as ET
 
 import requests
 
+from .relay_config import DEFAULT_BUILDING_HUB_RELAY_URL
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -721,7 +723,7 @@ class BuildingHubClient:
 
         raw_url = relay_url
         if raw_url is None:
-            raw_url = os.environ.get(self._RELAY_URL_ENV)
+            raw_url = os.environ.get(self._RELAY_URL_ENV) or DEFAULT_BUILDING_HUB_RELAY_URL
         raw_secret = relay_hmac_secret
         if raw_secret is None:
             raw_secret = os.environ.get(self._RELAY_HMAC_SECRET_ENV)
