@@ -702,13 +702,38 @@ def test_relay_does_not_mask_direct_api_or_http_errors(
     assert [call["method"] for call in session.calls] == ["GET"]
 
 
-def test_relay_configuration_requires_complete_secure_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_relay_configuration_can_derive_secret_from_existing_service_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("BUILDING_HUB_RELAY_URL", RELAY_URL)
     monkeypatch.delenv("BUILDING_HUB_RELAY_HMAC_SECRET", raising=False)
+    session = FakeSession(
+        requests.ConnectionError("direct DNS lookup failed"),
+        FakeResponse(payload=api_payload({"id": "derived-secret"})),
+    )
+    client = BuildingHubClient(KEY, session=session, max_retries=0)
 
-    with pytest.raises(BuildingHubValidationError, match="configured together"):
-        BuildingHubClient(KEY, session=FakeSession())
+    assert client.relay_enabled is True
+    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [{"id": "derived-secret"}]
+    relay_call = session.calls[1]
+    derived_secret = hashlib.sha256(
+        f"buildinghub-relay-v1\x00{KEY}".encode("utf-8")
+    ).hexdigest()
+    headers = relay_call["headers"]
+    signed = (
+        f"{headers['X-Building-Hub-Timestamp']}\n"
+        f"{headers['X-Building-Hub-Nonce']}\n"
+        f"getBrTitleInfo\n{relay_call['data']}"
+    ).encode("utf-8")
+    expected_signature = hmac.new(
+        derived_secret.encode("utf-8"), signed, hashlib.sha256
+    ).hexdigest()
+    assert headers["X-Building-Hub-Signature"] == expected_signature
+    assert KEY not in relay_call["data"]
+    assert KEY not in str(headers)
 
+
+def test_relay_configuration_validation_still_rejects_unsafe_values() -> None:
     with pytest.raises(BuildingHubValidationError, match="HTTPS"):
         BuildingHubClient(
             KEY,
@@ -723,6 +748,13 @@ def test_relay_configuration_requires_complete_secure_pair(monkeypatch: pytest.M
             session=FakeSession(),
             relay_url=RELAY_URL,
             relay_hmac_secret="too-short",
+        )
+
+    with pytest.raises(BuildingHubValidationError, match="RELAY_URL"):
+        BuildingHubClient(
+            KEY,
+            session=FakeSession(),
+            relay_hmac_secret=RELAY_SECRET,
         )
 
 

@@ -728,13 +728,22 @@ class BuildingHubClient:
 
         url = self._optional_config_text(raw_url)
         secret = self._optional_config_text(raw_secret)
-        if bool(url) != bool(secret):
-            raise BuildingHubValidationError(
-                "BUILDING_HUB_RELAY_URL and BUILDING_HUB_RELAY_HMAC_SECRET "
-                "must be configured together"
-            )
         if url is None:
+            if secret is not None:
+                raise BuildingHubValidationError(
+                    "BUILDING_HUB_RELAY_URL is required when "
+                    "BUILDING_HUB_RELAY_HMAC_SECRET is configured"
+                )
             return None
+
+        if secret is None:
+            # Avoid a second Streamlit secret for the free relay.  Both the
+            # Streamlit backend and Worker derive the same domain-separated
+            # HMAC key from the existing BuildingHUB service key.  The service
+            # key itself is never sent in the relay request.
+            secret = hashlib.sha256(
+                f"buildinghub-relay-v1\x00{self._service_key}".encode("utf-8")
+            ).hexdigest()
 
         return _RelayConfig(
             base_url=self._validate_relay_url(url),
