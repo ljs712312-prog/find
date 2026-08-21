@@ -28,10 +28,10 @@ try {
         throw "The deployment script was not found in the downloaded repository."
     }
 
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $deployScript
-    if ($LASTEXITCODE -ne 0) {
-        throw "Cloudflare deployment script exited with code $LASTEXITCODE."
-    }
+    # Run in this PowerShell process. This avoids environments that deny
+    # spawning a second powershell.exe and also keeps the temporary portable
+    # Node.js PATH scoped to this deployment session.
+    & $deployScript
 }
 finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
