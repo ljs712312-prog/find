@@ -17,6 +17,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
       - run: ruff check app.py src tests relay
+      - run: npm test --prefix relay/cloudflare-worker
