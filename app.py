@@ -53,7 +53,7 @@ from src.vworld import (
 # Bump this whenever cached API response interpretation changes.  Streamlit
 # hashes this argument into each entry, so a hot deploy cannot keep serving a
 # snapshot produced by an older register-mapping rule.
-LOOKUP_CACHE_SCHEMA = "2026-08-21.1"
+LOOKUP_CACHE_SCHEMA = "2026-08-21.2"
 PERMIT_CACHE_SCHEMA = "2026-08-15.1"
 GOVERNMENT24_REGISTER_URL = (
     "https://www.gov.kr/mw/AA020InfoCappView.do?CappBizCD=15000000098"
@@ -92,14 +92,7 @@ def _key_fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
-def _relay_fingerprint(url: str | None, hmac_secret: str | None) -> str:
-    """Return a non-secret cache identity for the optional network relay."""
-
-    material = f"{url or ''}\x00{hmac_secret or ''}".encode("utf-8")
-    return hashlib.sha256(material).hexdigest()[:16]
-
-
-@st.cache_data(ttl=6 * 60 * 60, max_entries=256, show_spinner=False)
+@st.cache_data(ttl=24 * 60 * 60, max_entries=256, show_spinner=False)
 def _lookup_api_cached(
     sigungu_cd: str,
     bjdong_cd: str,
@@ -108,20 +101,13 @@ def _lookup_api_cached(
     ji: str,
     cache_schema: str,
     key_fingerprint: str,
-    relay_fingerprint: str,
     _service_key: str,
-    _relay_url: str | None,
-    _relay_hmac_secret: str | None,
 ) -> RegisterSnapshot:
     # ``key_fingerprint`` invalidates old cached responses after key rotation;
     # the actual secret is excluded from Streamlit's cache key and never logged.
-    del cache_schema, key_fingerprint, relay_fingerprint
+    del cache_schema, key_fingerprint
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
-    with BuildingHubClient(
-        _service_key,
-        relay_url=_relay_url,
-        relay_hmac_secret=_relay_hmac_secret,
-    ) as client:
+    with BuildingHubClient(_service_key) as client:
         return lookup_register(client, land_key)
 
 
@@ -211,17 +197,17 @@ def _friendly_api_error(error: BuildingHubError) -> str:
         if error.reason == "connect_timeout":
             return (
                 f"건축HUB {endpoint_label} API에 연결하지 못했습니다 "
-                f"({error.attempts}회 재시도)."
+                f"({error.attempts}회 시도 후 중단)."
             )
         if error.reason == "read_timeout":
             return (
                 f"건축HUB {endpoint_label} API가 응답하지 않았습니다 "
-                f"({error.attempts}회 재시도)."
+                f"({error.attempts}회 시도 후 중단)."
             )
         if error.reason == "timeout":
             return (
                 f"건축HUB {endpoint_label} API 통신 시간이 초과했습니다 "
-                f"({error.attempts}회 재시도)."
+                f"({error.attempts}회 시도 후 중단)."
             )
         if error.reason == "tls":
             return "건축HUB 보안 연결을 만들지 못했습니다. 잠시 후 다시 조회해 주세요."
@@ -231,7 +217,7 @@ def _friendly_api_error(error: BuildingHubError) -> str:
     if isinstance(error, BuildingHubHTTPError):
         return f"건축HUB가 HTTP {error.status_code} 오류로 응답했습니다."
     if isinstance(error, BuildingHubValidationError):
-        return "건축HUB 또는 중계 서버 설정이 올바르지 않습니다."
+        return "건축HUB 요청 설정이 올바르지 않습니다."
     if isinstance(error, BuildingHubAPIError):
         if error.result_code == "10":
             return "건축HUB가 요청 파라미터 오류를 반환했습니다. 인증키 승인 동기화를 확인해 주세요."
@@ -263,9 +249,6 @@ def _friendly_permit_error(error: BuildingHubError) -> str:
 def _search(
     query: str,
     service_key: str | None,
-    *,
-    relay_url: str | None = None,
-    relay_hmac_secret: str | None = None,
 ) -> SearchOutcome:
     parsed = parse_address(query)
     if service_key:
@@ -274,14 +257,11 @@ def _search(
                 *_land_args(parsed.land_key),
                 LOOKUP_CACHE_SCHEMA,
                 _key_fingerprint(service_key),
-                _relay_fingerprint(relay_url, relay_hmac_secret),
                 service_key,
-                relay_url,
-                relay_hmac_secret,
             )
             snapshot = _lookup_api_cached(*cache_args)
-            # Do not hold an incomplete gateway response for the normal six
-            # hour cache lifetime.  The result remains visible for this run,
+            # Do not hold an incomplete gateway response for the normal 24-hour
+            # cache lifetime.  The result remains visible for this run,
             # but the next explicit search retries only this parcel's entry.
             if snapshot.is_partial:
                 _lookup_api_cached.clear(*cache_args)
@@ -1314,14 +1294,7 @@ def render_app() -> None:
             try:
                 with st.spinner("건축HUB 건축물 정보를 확인하고 있습니다…"):
                     building_key = _secret("BUILDING_HUB_API_KEY")
-                    relay_url = _secret("BUILDING_HUB_RELAY_URL")
-                    relay_hmac_secret = _secret("BUILDING_HUB_RELAY_HMAC_SECRET")
-                    st.session_state.search_outcome = _search(
-                        query,
-                        building_key,
-                        relay_url=relay_url,
-                        relay_hmac_secret=relay_hmac_secret,
-                    )
+                    st.session_state.search_outcome = _search(query, building_key)
             except AddressParseError as error:
                 st.error(str(error))
 

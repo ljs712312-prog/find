@@ -56,6 +56,7 @@ LOOKUP_ENDPOINTS = (
 # the card, but can safely be omitted for one query when the public gateway is
 # temporarily slow.  Auth/quota/validation failures never enter this path.
 REQUIRED_LOOKUP_ENDPOINTS = frozenset({TITLE_ENDPOINT})
+NETWORK_PATH_FAILURES = frozenset({"connect_timeout", "connection", "tls", "proxy"})
 
 COLLECTIVE_UNIT_SOURCE_LABEL = "집합건물 전유부"
 EXPLICIT_API_UNIT_SOURCE_LABEL = "API 반환 호별 정보"
@@ -685,7 +686,18 @@ def lookup_buildings(
     stats: list[EndpointStats] = []
     unavailable_endpoints: list[UnavailableEndpoint] = []
     warnings: list[str] = []
+    network_path_failure: UnavailableEndpoint | None = None
     for endpoint in LOOKUP_ENDPOINTS:
+        if network_path_failure is not None and endpoint not in REQUIRED_LOOKUP_ENDPOINTS:
+            rows_by_endpoint[endpoint] = []
+            unavailable_endpoints.append(
+                UnavailableEndpoint(endpoint, network_path_failure.reason, attempts=0)
+            )
+            warnings.append(
+                f"{endpoint}: 앞선 네트워크 연결 장애로 이번 조회에서 생략했습니다. "
+                "다시 조회하면 자동으로 보완됩니다."
+            )
+            continue
         try:
             raw_rows = client.fetch_all(endpoint, land_key, num_of_rows=num_of_rows)
         except BuildingHubError as error:
@@ -694,6 +706,8 @@ def lookup_buildings(
                 raise
             rows_by_endpoint[endpoint] = []
             unavailable_endpoints.append(unavailable)
+            if unavailable.reason in NETWORK_PATH_FAILURES:
+                network_path_failure = unavailable
             warnings.append(
                 f"{endpoint}: 이번 조회에서 상세자료를 받지 못했습니다. "
                 "다시 조회하면 자동으로 보완됩니다."

@@ -8,23 +8,17 @@ exception messages.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import hashlib
-import hmac
 import json
 import logging
-import os
-import secrets
 import time
 from collections.abc import Mapping
 from typing import Any, Callable
-from urllib.parse import quote, quote_plus, urlsplit
+from urllib.parse import quote, quote_plus
 import xml.etree.ElementTree as ET
 
 import requests
-
-from .relay_config import DEFAULT_BUILDING_HUB_RELAY_URL
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -117,27 +111,10 @@ class _Page:
     page_no: int | None
 
 
-@dataclass(frozen=True)
-class _RelayConfig:
-    """Configuration for the narrowly scoped, signed BuildingHUB relay.
-
-    The HMAC secret is intentionally omitted from the dataclass representation
-    so an accidental debug representation cannot disclose it.
-    """
-
-    base_url: str
-    hmac_secret: str = field(repr=False)
-
-
 class BuildingHubClient:
     """Fetch normalized building-register rows from the official HUB service."""
 
     BASE_URL = "https://apis.data.go.kr/1613000/BldRgstHubService"
-    _REGISTER_BASE_URL = BASE_URL
-    _RELAY_URL_ENV = "BUILDING_HUB_RELAY_URL"
-    _RELAY_HMAC_SECRET_ENV = "BUILDING_HUB_RELAY_HMAC_SECRET"
-    _RELAY_FALLBACK_REASONS = frozenset({"connect_timeout", "connection", "tls"})
-
     ENDPOINTS = frozenset(
         {
             "getBrTitleInfo",
@@ -171,13 +148,11 @@ class BuildingHubClient:
         service_key: str,
         *,
         session: Any | None = None,
-        timeout: float | tuple[float, float] = (3.05, 15.0),
+        timeout: float | tuple[float, float] = (5.0, 20.0),
         max_retries: int = 3,
         backoff_factor: float = 0.25,
         max_pages: int = 10_000,
         sleep: Callable[[float], None] = time.sleep,
-        relay_url: str | None = None,
-        relay_hmac_secret: str | None = None,
     ) -> None:
         key = str(service_key).strip() if service_key is not None else ""
         if not key:
@@ -198,23 +173,13 @@ class BuildingHubClient:
         self._backoff_factor = float(backoff_factor)
         self._max_pages = max_pages
         self._sleep = sleep
-        self._relay_config = self._configure_relay(
-            relay_url=relay_url,
-            relay_hmac_secret=relay_hmac_secret,
-        )
 
     def __repr__(self) -> str:
         return (
             f"{type(self).__name__}(base_url={self.BASE_URL!r}, "
             "service_key='[REDACTED]', "
-            f"relay_enabled={self.relay_enabled}, max_retries={self._max_retries})"
+            f"max_retries={self._max_retries})"
         )
-
-    @property
-    def relay_enabled(self) -> bool:
-        """Whether this client may fall back to the signed register relay."""
-
-        return self._relay_config is not None
 
     def close(self) -> None:
         if self._owns_session and hasattr(self._session, "close"):
@@ -337,20 +302,6 @@ class BuildingHubClient:
                 )
             except requests.exceptions.RequestException as error:
                 reason = self._network_failure_reason(error)
-                if self._should_fallback_to_relay(reason):
-                    LOGGER.info(
-                        "BuildingHUB direct transport failed; using signed relay "
-                        "endpoint=%s reason=%s direct_attempts=%s",
-                        endpoint,
-                        reason,
-                        attempt + 1,
-                    )
-                    return self._request_relay_page(
-                        endpoint,
-                        params,
-                        direct_attempts=attempt + 1,
-                        started_at=started_at,
-                    )
                 if attempt < self._max_retries:
                     self._backoff(attempt)
                     continue
@@ -395,7 +346,7 @@ class BuildingHubClient:
                     # Preserve the transport retry policy for other gateway
                     # errors carried by 429/5xx responses.  On ordinary 4xx,
                     # the decoded API error is immediately actionable.
-                    if status == 429 or 500 <= status <= 599:
+                    if self._retryable_http_status(status):
                         if attempt < self._max_retries:
                             self._backoff(attempt, self._retry_after(response))
                             continue
@@ -403,7 +354,7 @@ class BuildingHubClient:
                 except (BuildingHubDecodeError, BuildingHubEnvelopeError):
                     pass
 
-            if status == 429 or 500 <= status <= 599:
+            if self._retryable_http_status(status):
                 if attempt < self._max_retries:
                     self._backoff(attempt, self._retry_after(response))
                     continue
@@ -419,132 +370,17 @@ class BuildingHubClient:
                     self._backoff(attempt, self._retry_after(response))
                     continue
                 raise
+            except (BuildingHubDecodeError, BuildingHubEnvelopeError):
+                # The public gateway occasionally terminates a successful HTTP
+                # response early or returns a transient HTML/empty body.  A
+                # bounded retry repairs that case without masking a persistent
+                # schema change.
+                if attempt < self._max_retries:
+                    self._backoff(attempt)
+                    continue
+                raise
 
         raise AssertionError("unreachable retry loop")
-
-    def _should_fallback_to_relay(self, reason: str) -> bool:
-        """Return whether the failed *direct* attempt may use the relay.
-
-        The relay is an egress-path fallback, not a second interpretation of
-        API responses.  In particular, a response that reached BuildingHUB
-        (HTTP/API/auth/quota/rate-limit/read-timeout) must remain direct and
-        actionable instead of being hidden behind another service.
-        """
-
-        return (
-            self._relay_config is not None
-            and reason in self._RELAY_FALLBACK_REASONS
-        )
-
-    def _request_relay_page(
-        self,
-        endpoint: str,
-        params: dict[str, Any],
-        *,
-        direct_attempts: int,
-        started_at: float,
-    ) -> _Page:
-        """Ask the narrowly scoped relay for one already-validated page.
-
-        The service key is deliberately absent from this request.  The relay
-        owns its own BuildingHUB service key and receives only the endpoint
-        selected by this client plus already-whitelisted parcel parameters.
-        """
-
-        config = self._relay_config
-        if config is None:  # Defensive: this method is private and gated above.
-            raise AssertionError("relay request attempted without relay configuration")
-
-        body = self._canonical_json({"params": dict(params)})
-        timestamp = str(int(time.time()))
-        nonce = secrets.token_urlsafe(24)
-        signature = self._relay_signature(
-            secret=config.hmac_secret,
-            timestamp=timestamp,
-            nonce=nonce,
-            endpoint=endpoint,
-            body=body,
-        )
-        url = f"{config.base_url}/v1/building-hub/{quote(endpoint, safe='')}"
-        headers = {
-            "Accept": "application/json, application/xml",
-            "Content-Type": "application/json; charset=utf-8",
-            "X-Building-Hub-Timestamp": timestamp,
-            "X-Building-Hub-Nonce": nonce,
-            "X-Building-Hub-Signature": signature,
-        }
-
-        try:
-            response = self._session.post(
-                url,
-                data=body,
-                headers=headers,
-                timeout=self._timeout,
-            )
-        except requests.exceptions.RequestException as error:
-            reason = self._network_failure_reason(error)
-            LOGGER.warning(
-                "BuildingHUB relay request failed endpoint=%s reason=%s attempts=%s elapsed_ms=%s",
-                endpoint,
-                reason,
-                direct_attempts + 1,
-                round((time.monotonic() - started_at) * 1000),
-            )
-            raise BuildingHubNetworkError(
-                endpoint=endpoint,
-                attempts=direct_attempts + 1,
-                reason=reason,
-                elapsed_seconds=time.monotonic() - started_at,
-            ) from None
-
-        status = getattr(response, "status_code", None)
-        if not isinstance(status, int):
-            raise BuildingHubHTTPError(0, retryable=False)
-
-        if status < 200 or status >= 300:
-            # The relay forwards the official envelope unchanged.  Preserve an
-            # actionable upstream auth/quota/API error when one is present;
-            # otherwise expose only the relay's safe status code.
-            try:
-                payload = self._decode_payload(response)
-                self._extract_page(payload)
-            except BuildingHubAPIError:
-                raise
-            except (BuildingHubDecodeError, BuildingHubEnvelopeError):
-                pass
-            raise BuildingHubHTTPError(
-                status,
-                retryable=status == 429 or 500 <= status <= 599,
-            )
-
-        payload = self._decode_payload(response)
-        return self._extract_page(payload)
-
-    @staticmethod
-    def _canonical_json(value: Mapping[str, Any]) -> str:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-
-    @staticmethod
-    def _relay_signature(
-        *,
-        secret: str,
-        timestamp: str,
-        nonce: str,
-        endpoint: str,
-        body: str,
-    ) -> str:
-        signed = f"{timestamp}\n{nonce}\n{endpoint}\n{body}".encode("utf-8")
-        return hmac.new(
-            secret.encode("utf-8"),
-            signed,
-            hashlib.sha256,
-        ).hexdigest()
 
     def _decode_payload(self, response: Any) -> Mapping[str, Any]:
         text = getattr(response, "text", None)
@@ -703,106 +539,6 @@ class BuildingHubClient:
             return normalized
         raise BuildingHubEnvelopeError("response item must be null, an object, or a list")
 
-    def _configure_relay(
-        self,
-        *,
-        relay_url: str | None,
-        relay_hmac_secret: str | None,
-    ) -> _RelayConfig | None:
-        """Validate optional signed-relay settings without affecting other APIs."""
-
-        if self.BASE_URL.rstrip("/") != self._REGISTER_BASE_URL:
-            # ``BuildingPermitHubClient`` inherits the transport but points to
-            # a different official service.  Never let register relay settings
-            # silently route permit calls to the wrong upstream API.
-            if relay_url is not None or relay_hmac_secret is not None:
-                raise BuildingHubValidationError(
-                    "the BuildingHUB relay is only available for the register service"
-                )
-            return None
-
-        raw_url = relay_url
-        if raw_url is None:
-            raw_url = os.environ.get(self._RELAY_URL_ENV) or DEFAULT_BUILDING_HUB_RELAY_URL
-        raw_secret = relay_hmac_secret
-        if raw_secret is None:
-            raw_secret = os.environ.get(self._RELAY_HMAC_SECRET_ENV)
-
-        url = self._optional_config_text(raw_url)
-        secret = self._optional_config_text(raw_secret)
-        if url is None:
-            if secret is not None:
-                raise BuildingHubValidationError(
-                    "BUILDING_HUB_RELAY_URL is required when "
-                    "BUILDING_HUB_RELAY_HMAC_SECRET is configured"
-                )
-            return None
-
-        if secret is None:
-            # Avoid a second Streamlit secret for the free relay.  Both the
-            # Streamlit backend and Worker derive the same domain-separated
-            # HMAC key from the existing BuildingHUB service key.  The service
-            # key itself is never sent in the relay request.
-            secret = hashlib.sha256(
-                f"buildinghub-relay-v1\x00{self._service_key}".encode("utf-8")
-            ).hexdigest()
-
-        return _RelayConfig(
-            base_url=self._validate_relay_url(url),
-            hmac_secret=self._validate_relay_hmac_secret(secret),
-        )
-
-    @staticmethod
-    def _optional_config_text(value: Any) -> str | None:
-        if value is None:
-            return None
-        text = str(value)
-        return text if text.strip() else None
-
-    @staticmethod
-    def _validate_relay_url(value: str) -> str:
-        if value != value.strip() or any(char.isspace() for char in value):
-            raise BuildingHubValidationError(
-                "BUILDING_HUB_RELAY_URL must not contain whitespace"
-            )
-        try:
-            parsed = urlsplit(value)
-            # Accessing ``port`` forces urlsplit to validate its numeric range.
-            _ = parsed.port
-        except ValueError:
-            raise BuildingHubValidationError(
-                "BUILDING_HUB_RELAY_URL must be a valid HTTPS URL"
-            ) from None
-        if (
-            parsed.scheme.lower() != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-            or "\\" in parsed.path
-            or ".." in parsed.path.split("/")
-        ):
-            raise BuildingHubValidationError(
-                "BUILDING_HUB_RELAY_URL must be an absolute HTTPS URL without "
-                "credentials, query, or fragment"
-            )
-        return value.rstrip("/")
-
-    @staticmethod
-    def _validate_relay_hmac_secret(value: str | None) -> str:
-        if value is None:
-            raise AssertionError("relay HMAC secret must be present after validation")
-        if value != value.strip() or any(char.isspace() for char in value):
-            raise BuildingHubValidationError(
-                "BUILDING_HUB_RELAY_HMAC_SECRET must not contain whitespace"
-            )
-        if len(value) < 32:
-            raise BuildingHubValidationError(
-                "BUILDING_HUB_RELAY_HMAC_SECRET must be at least 32 characters"
-            )
-        return value
-
     def _land_params(self, land_key: Mapping[str, Any] | object) -> dict[str, str]:
         params: dict[str, str] = {}
         for api_name, aliases in self._LAND_FIELD_ALIASES.items():
@@ -892,6 +628,10 @@ class BuildingHubClient:
             return None
 
     @staticmethod
+    def _retryable_http_status(status: int) -> bool:
+        return status in {408, 429} or 500 <= status <= 599
+
+    @staticmethod
     def _network_failure_reason(error: requests.exceptions.RequestException) -> str:
         """Return a stable, non-sensitive category for an HTTP failure."""
 
@@ -924,12 +664,9 @@ class BuildingHubClient:
 
     def _redact(self, value: Any) -> str:
         text = str(value or "")
-        secrets_to_redact = [self._service_key]
-        if self._relay_config is not None:
-            secrets_to_redact.append(self._relay_config.hmac_secret)
         candidates = {
             encoded
-            for secret in secrets_to_redact
+            for secret in (self._service_key,)
             for encoded in (
                 secret,
                 quote(secret, safe=""),
