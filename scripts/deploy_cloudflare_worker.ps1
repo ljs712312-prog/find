@@ -18,6 +18,136 @@ function ConvertFrom-SecureStringPlain {
     }
 }
 
+function Get-UsableNodeVersion {
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    $npxCommand = Get-Command npx -ErrorAction SilentlyContinue
+    if (-not $nodeCommand -or -not $npxCommand) {
+        return $null
+    }
+
+    try {
+        $versionText = (& node --version 2>$null).Trim()
+    }
+    catch {
+        return $null
+    }
+
+    if ($versionText -notmatch '^v(?<major>\d+)\.') {
+        return $null
+    }
+    if ([int]$Matches.major -lt 20) {
+        return $null
+    }
+    return $versionText
+}
+
+function Enable-Tls12ForWindowsPowerShell {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    }
+    catch {
+        # PowerShell 7+ uses the modern .NET HTTP stack and does not need this.
+    }
+}
+
+function Install-PortableNodeLts {
+    Enable-Tls12ForWindowsPowerShell
+
+    $architecture = $env:PROCESSOR_ARCHITEW6432
+    if ([string]::IsNullOrWhiteSpace($architecture)) {
+        $architecture = $env:PROCESSOR_ARCHITECTURE
+    }
+    $nodeArch = if ($architecture -match 'ARM64') { 'arm64' } else { 'x64' }
+    $fileMarker = "win-$nodeArch-zip"
+
+    Write-Host "Node.js 20+ was not found. Preparing an official portable Node.js LTS runtime..."
+
+    try {
+        $releases = Invoke-RestMethod -Uri "https://nodejs.org/dist/index.json" -Method Get -TimeoutSec 30
+    }
+    catch {
+        throw "Could not read the official Node.js release index from nodejs.org. Check the internet connection and run the same command again."
+    }
+
+    $release = $releases |
+        Where-Object { $_.lts -and ($_.files -contains $fileMarker) } |
+        Select-Object -First 1
+    if (-not $release) {
+        throw "Could not find a current Node.js LTS Windows $nodeArch portable build."
+    }
+
+    $version = [string]$release.version
+    if ($version -notmatch '^v(?<major>\d+)\.' -or [int]$Matches.major -lt 20) {
+        throw "The Node.js release index returned an unexpected LTS version: $version"
+    }
+
+    $fileName = "node-$version-win-$nodeArch.zip"
+    $distBase = "https://nodejs.org/dist/$version"
+    $runtimeRoot = Join-Path $env:TEMP "won-top-node-runtime"
+    $downloadRoot = Join-Path $env:TEMP "won-top-node-download"
+    $zipPath = Join-Path $downloadRoot $fileName
+    $extractDir = Join-Path $runtimeRoot "node-$version-win-$nodeArch"
+
+    if (-not (Test-Path (Join-Path $extractDir "node.exe"))) {
+        Remove-Item -LiteralPath $downloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $runtimeRoot -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
+        New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+
+        Write-Host "Downloading Node.js $version portable runtime from nodejs.org..."
+        try {
+            Invoke-WebRequest -Uri "$distBase/$fileName" -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
+            $checksumText = (Invoke-WebRequest -Uri "$distBase/SHASUMS256.txt" -UseBasicParsing -TimeoutSec 30).Content
+        }
+        catch {
+            throw "Failed to download the official Node.js runtime or checksum file from nodejs.org."
+        }
+
+        $escapedFileName = [regex]::Escape($fileName)
+        $checksumMatch = [regex]::Match(
+            [string]$checksumText,
+            "(?mi)^([0-9a-f]{64})\s+$escapedFileName\s*$"
+        )
+        if (-not $checksumMatch.Success) {
+            throw "Could not find the SHA-256 checksum for $fileName in Node.js SHASUMS256.txt."
+        }
+
+        $expectedHash = $checksumMatch.Groups[1].Value.ToUpperInvariant()
+        $actualHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToUpperInvariant()
+        if ($actualHash -ne $expectedHash) {
+            Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+            throw "Node.js portable runtime checksum verification failed. The downloaded file was discarded."
+        }
+
+        Write-Host "Node.js SHA-256 verified. Extracting the portable runtime..."
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $runtimeRoot -Force
+        Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not (Test-Path (Join-Path $extractDir "node.exe"))) {
+        throw "Portable Node.js extraction completed, but node.exe was not found."
+    }
+
+    $env:Path = "$extractDir;$env:Path"
+    $versionText = Get-UsableNodeVersion
+    if (-not $versionText) {
+        throw "Portable Node.js was prepared but could not be activated in this PowerShell session."
+    }
+
+    Write-Host "Portable Node.js $versionText is ready. Nothing was installed system-wide."
+    return $versionText
+}
+
+function Ensure-NodeRuntime {
+    $versionText = Get-UsableNodeVersion
+    if ($versionText) {
+        Write-Host "Using existing Node.js $versionText."
+        return $versionText
+    }
+    return Install-PortableNodeLts
+}
+
 function Invoke-Wrangler {
     param(
         [Parameter(Mandatory = $true)][string[]]$Arguments,
@@ -44,20 +174,7 @@ if (-not (Test-Path (Join-Path $workerDir "wrangler.jsonc"))) {
     throw "Cloudflare Worker directory was not found: $workerDir"
 }
 
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    throw "Node.js 20+ is required. Install Node.js and run this script again."
-}
-if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
-    throw "npx was not found. Install Node.js 20+ and run this script again."
-}
-
-$nodeVersionText = (& node --version).Trim()
-if ($nodeVersionText -notmatch '^v(?<major>\d+)\.') {
-    throw "Could not determine the Node.js version: $nodeVersionText"
-}
-if ([int]$Matches.major -lt 20) {
-    throw "Node.js 20+ is required. Current version: $nodeVersionText"
-}
+Ensure-NodeRuntime | Out-Null
 
 Write-Host "[1/6] Running Worker unit tests..."
 Push-Location $workerDir
