@@ -11,9 +11,33 @@ The Streamlit app still calls BuildingHUB directly first. Only direct `connect_t
 - `placement.hostname = "apis.data.go.kr"` asks Cloudflare to execute the Worker near the BuildingHUB upstream rather than near the Streamlit caller.
 - No GCP billing project or Cloud Run deployment is required.
 
-## Deploy
+## Recommended Windows deployment
 
 Requirements: Node.js 20+ and a free Cloudflare account.
+
+From the repository root, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy_cloudflare_worker.ps1
+```
+
+The helper performs the complete relay deployment flow:
+
+1. runs the Worker unit tests;
+2. checks Cloudflare authentication and opens browser login when needed;
+3. deploys the Worker;
+4. asks for the existing `BUILDING_HUB_API_KEY` with hidden console input;
+5. generates a new random HMAC secret and saves both Worker secrets;
+6. checks `/healthz`;
+7. copies only the two Streamlit relay secret lines to the Windows clipboard.
+
+After it finishes, open Streamlit Community Cloud > App settings > Secrets, **keep the existing `BUILDING_HUB_API_KEY`**, paste the clipboard contents, and save.
+
+The helper never prints the BuildingHUB key or generated HMAC value. If Wrangler output does not expose the `workers.dev` URL in a parseable form, the helper asks you to paste that URL once instead of repeating deployment.
+
+## Manual deployment
+
+If you prefer to run each command manually:
 
 ```powershell
 Set-Location relay\cloudflare-worker
