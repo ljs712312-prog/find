@@ -6,18 +6,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function ConvertFrom-SecureStringPlain {
-    param([Parameter(Mandatory = $true)][Security.SecureString]$SecureValue)
-
-    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
-    try {
-        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-    }
-    finally {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-    }
-}
-
 function Get-UsableNodeVersion {
     $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
     $npxCommand = Get-Command npx -ErrorAction SilentlyContinue
@@ -150,18 +138,12 @@ function Ensure-NodeRuntime {
 
 function Invoke-Wrangler {
     param(
-        [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [switch]$Capture
+        [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
-    if ($Capture) {
-        $output = & npx --yes wrangler@latest @Arguments 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw "Wrangler command failed: $($Arguments -join ' ')`n$output"
-        }
-        return $output
-    }
-
+    # Keep Wrangler attached directly to the current terminal. Piping/capturing its
+    # stdin/stdout makes Wrangler classify the process as non-interactive and then
+    # require CLOUDFLARE_API_TOKEN instead of allowing normal browser OAuth.
     & npx --yes wrangler@latest @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "Wrangler command failed: $($Arguments -join ' ')"
@@ -198,37 +180,23 @@ try {
     }
 
     Write-Host "[3/6] Deploying the Worker using the Free-compatible configuration..."
-    $deployOutput = Invoke-Wrangler -Arguments @("deploy") -Capture
-    Write-Host $deployOutput.Trim()
+    Invoke-Wrangler -Arguments @("deploy")
 
     if ([string]::IsNullOrWhiteSpace($WorkerUrl)) {
-        $urlMatch = [regex]::Match($deployOutput, 'https://[A-Za-z0-9.-]+\.workers\.dev')
-        if ($urlMatch.Success) {
-            $WorkerUrl = $urlMatch.Value
-        }
-        else {
-            $WorkerUrl = Read-Host "Deployment succeeded. Paste the workers.dev URL shown by Wrangler or the Cloudflare dashboard"
-        }
+        Write-Host ""
+        Write-Host "Wrangler printed the deployed workers.dev URL above."
+        $WorkerUrl = Read-Host "Copy that https://...workers.dev URL and paste it here"
     }
     if ($WorkerUrl -notmatch '^https://[A-Za-z0-9.-]+\.workers\.dev/?$') {
         throw "Worker URL must be an https://...workers.dev address."
     }
     $workerUrl = $WorkerUrl.TrimEnd("/")
 
-    Write-Host "[4/6] Reading the existing BuildingHUB API key securely..."
-    $secureApiKey = Read-Host "Paste the current BUILDING_HUB_API_KEY (input is hidden)" -AsSecureString
-    $apiKey = ConvertFrom-SecureStringPlain -SecureValue $secureApiKey
-    if ([string]::IsNullOrWhiteSpace($apiKey)) {
-        throw "BUILDING_HUB_API_KEY cannot be empty."
-    }
+    Write-Host "[4/6] Preparing to save the existing BuildingHUB API key..."
+    Write-Host "Wrangler will ask for the secret value directly. Paste the current BUILDING_HUB_API_KEY only into that prompt."
 
     Write-Host "[5/6] Saving the BuildingHUB key in the Worker secret store..."
-    $apiKey | & npx --yes wrangler@latest secret put DATA_GO_SERVICE_KEY | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to save DATA_GO_SERVICE_KEY."
-    }
-    $apiKey = $null
-    $secureApiKey = $null
+    Invoke-Wrangler -Arguments @("secret", "put", "DATA_GO_SERVICE_KEY")
 
     Write-Host "[6/6] Checking Worker health..."
     $health = Invoke-RestMethod -Uri "$workerUrl/healthz" -Method Get -TimeoutSec 20
