@@ -41,12 +41,14 @@ class BuildingHubNetworkError(BuildingHubError):
         endpoint: str,
         attempts: int,
         reason: str,
+        elapsed_seconds: float | None = None,
     ) -> None:
         # Keep only safe diagnostic metadata.  In particular, do not keep a
         # requests exception object because it can contain the service-key URL.
         self.endpoint = endpoint
         self.attempts = attempts
         self.reason = reason
+        self.elapsed_seconds = elapsed_seconds
         super().__init__(
             "Building HUB network error "
             f"({reason}) after {attempts} attempt(s) at {endpoint}"
@@ -168,13 +170,6 @@ class BuildingHubClient:
         self._service_key = key
         self._session = session if session is not None else requests.Session()
         self._owns_session = session is None
-        if self._owns_session:
-            # A service key is placed in the official gateway query string.
-            # Avoid inheriting an ambient HTTP(S) proxy configuration, which
-            # can both make a cloud deployment flaky and expose that key to an
-            # unrelated proxy.  Streamlit Community Cloud supports direct
-            # outbound HTTPS, and requests will still use its normal CA store.
-            self._session.trust_env = False
         self._timeout = timeout
         self._max_retries = max_retries
         self._backoff_factor = float(backoff_factor)
@@ -297,6 +292,7 @@ class BuildingHubClient:
         url = f"{self.BASE_URL}/{endpoint}"
         request_params = dict(params)
         request_params["serviceKey"] = self._service_key
+        started_at = time.monotonic()
 
         for attempt in range(self._max_retries + 1):
             try:
@@ -311,15 +307,17 @@ class BuildingHubClient:
                     continue
                 reason = self._network_failure_reason(error)
                 LOGGER.warning(
-                    "BuildingHUB request failed endpoint=%s reason=%s attempts=%s",
+                    "BuildingHUB request failed endpoint=%s reason=%s attempts=%s elapsed_ms=%s",
                     endpoint,
                     reason,
                     attempt + 1,
+                    round((time.monotonic() - started_at) * 1000),
                 )
                 raise BuildingHubNetworkError(
                     endpoint=endpoint,
                     attempts=attempt + 1,
                     reason=reason,
+                    elapsed_seconds=time.monotonic() - started_at,
                 ) from None
 
             status = getattr(response, "status_code", None)

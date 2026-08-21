@@ -455,10 +455,10 @@ def test_network_timeout_uses_four_attempts_and_keeps_safe_diagnostics() -> None
     assert KEY not in str(caught.value)
 
 
-def test_owned_session_ignores_ambient_proxy_settings() -> None:
+def test_owned_session_keeps_environment_defaults() -> None:
     client = BuildingHubClient(KEY)
     try:
-        assert client._session.trust_env is False
+        assert client._session.trust_env is True
     finally:
         client.close()
 

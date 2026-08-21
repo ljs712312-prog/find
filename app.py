@@ -185,8 +185,29 @@ def _friendly_api_error(error: BuildingHubError) -> str:
     if isinstance(error, BuildingHubRateLimitError):
         return "건축HUB 요청이 잠시 몰렸습니다. 잠시 후 다시 조회해 주세요."
     if isinstance(error, BuildingHubNetworkError):
-        if error.reason in {"connect_timeout", "read_timeout", "timeout"}:
-            return "건축HUB 응답이 지연되어 자동 재시도 후에도 완료되지 않았습니다."
+        endpoint_label = {
+            "getBrTitleInfo": "표제부",
+            "getBrBasisOulnInfo": "기본개요",
+            "getBrRecapTitleInfo": "총괄표제부",
+            "getBrFlrOulnInfo": "층별개요",
+            "getBrExposInfo": "전유부",
+            "getBrExposPubuseAreaInfo": "전유·공용면적",
+        }.get(error.endpoint, "건축물대장")
+        if error.reason == "connect_timeout":
+            return (
+                f"건축HUB {endpoint_label} API에 연결하지 못했습니다 "
+                f"({error.attempts}회 재시도)."
+            )
+        if error.reason == "read_timeout":
+            return (
+                f"건축HUB {endpoint_label} API가 응답하지 않았습니다 "
+                f"({error.attempts}회 재시도)."
+            )
+        if error.reason == "timeout":
+            return (
+                f"건축HUB {endpoint_label} API 통신 시간이 초과했습니다 "
+                f"({error.attempts}회 재시도)."
+            )
         if error.reason == "tls":
             return "건축HUB 보안 연결을 만들지 못했습니다. 잠시 후 다시 조회해 주세요."
         if error.reason == "proxy":

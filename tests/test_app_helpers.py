@@ -61,7 +61,8 @@ def test_network_error_explains_delay_without_raw_request_data() -> None:
 
     message = _friendly_api_error(error)
 
-    assert "응답이 지연" in message
+    assert "표제부" in message
+    assert "응답하지 않았습니다" in message
     assert "getBrTitleInfo" not in message
 
 
