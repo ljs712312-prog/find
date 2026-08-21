@@ -1,6 +1,8 @@
 from decimal import Decimal
 from types import SimpleNamespace
 
+import app as app_module
+
 from app import (
     _date,
     _decimal_text,
@@ -15,7 +17,11 @@ from app import (
     _violation_lookup_identity,
 )
 from src.address import parse_address
-from src.building_hub import BuildingHubAPIError, BuildingHubAuthError
+from src.building_hub import (
+    BuildingHubAPIError,
+    BuildingHubAuthError,
+    BuildingHubNetworkError,
+)
 from src.gyeonggi_portal import PortalBuildingReference, PortalBuildingState
 from src.permit_lookup import PermitUnitReference
 
@@ -44,6 +50,43 @@ def test_api_errors_are_user_friendly_without_raw_key_message() -> None:
     assert "secret" not in _friendly_api_error(auth)
     assert "secret" not in _friendly_api_error(generic)
     assert "동기화" in _friendly_api_error(generic)
+
+
+def test_network_error_explains_delay_without_raw_request_data() -> None:
+    error = BuildingHubNetworkError(
+        endpoint="getBrTitleInfo",
+        attempts=4,
+        reason="read_timeout",
+    )
+
+    message = _friendly_api_error(error)
+
+    assert "응답이 지연" in message
+    assert "getBrTitleInfo" not in message
+
+
+def test_partial_snapshot_is_not_kept_in_the_long_lived_lookup_cache(
+    monkeypatch: object,
+) -> None:
+    class CachedLookup:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+            self.cleared: list[tuple[object, ...]] = []
+
+        def __call__(self, *args: object) -> SimpleNamespace:
+            self.calls.append(args)
+            return SimpleNamespace(is_partial=True)
+
+        def clear(self, *args: object) -> None:
+            self.cleared.append(args)
+
+    cached_lookup = CachedLookup()
+    monkeypatch.setattr(app_module, "_lookup_api_cached", cached_lookup)  # type: ignore[attr-defined]
+
+    outcome = app_module._search("망포동 6-11", "test-service-key")
+
+    assert outcome.snapshot is not None
+    assert cached_lookup.cleared == cached_lookup.calls
 
 
 def test_permit_auth_error_is_separate_and_does_not_echo_secret() -> None:

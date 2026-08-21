@@ -432,6 +432,35 @@ def test_network_failure_after_retries_is_sanitized() -> None:
         client.fetch_all("getBrTitleInfo", LAND_DICT)
 
     assert KEY not in str(caught.value)
+    assert caught.value.endpoint == "getBrTitleInfo"
+    assert caught.value.attempts == 1
+    assert caught.value.reason == "timeout"
+
+
+def test_network_timeout_uses_four_attempts_and_keeps_safe_diagnostics() -> None:
+    sleeps: list[float] = []
+    session = FakeSession(
+        *[requests.ReadTimeout(f"read timeout for {KEY}") for _ in range(4)]
+    )
+    client = BuildingHubClient(KEY, session=session, sleep=sleeps.append)
+
+    with pytest.raises(BuildingHubNetworkError) as caught:
+        client.fetch_all("getBrTitleInfo", LAND_DICT)
+
+    assert len(session.calls) == 4
+    assert sleeps == [0.25, 0.5, 1.0]
+    assert caught.value.endpoint == "getBrTitleInfo"
+    assert caught.value.attempts == 4
+    assert caught.value.reason == "read_timeout"
+    assert KEY not in str(caught.value)
+
+
+def test_owned_session_ignores_ambient_proxy_settings() -> None:
+    client = BuildingHubClient(KEY)
+    try:
+        assert client._session.trust_env is False
+    finally:
+        client.close()
 
 
 def test_http_429_and_5xx_are_retried() -> None:

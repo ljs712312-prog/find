@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Mapping
 from typing import Any, Callable
@@ -18,6 +19,9 @@ from urllib.parse import quote, quote_plus
 import xml.etree.ElementTree as ET
 
 import requests
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class BuildingHubError(RuntimeError):
@@ -30,6 +34,23 @@ class BuildingHubValidationError(BuildingHubError, ValueError):
 
 class BuildingHubNetworkError(BuildingHubError):
     """The request could not reach the public-data gateway."""
+
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        attempts: int,
+        reason: str,
+    ) -> None:
+        # Keep only safe diagnostic metadata.  In particular, do not keep a
+        # requests exception object because it can contain the service-key URL.
+        self.endpoint = endpoint
+        self.attempts = attempts
+        self.reason = reason
+        super().__init__(
+            "Building HUB network error "
+            f"({reason}) after {attempts} attempt(s) at {endpoint}"
+        )
 
 
 class BuildingHubHTTPError(BuildingHubError):
@@ -128,7 +149,7 @@ class BuildingHubClient:
         *,
         session: Any | None = None,
         timeout: float | tuple[float, float] = (3.05, 15.0),
-        max_retries: int = 2,
+        max_retries: int = 3,
         backoff_factor: float = 0.25,
         max_pages: int = 10_000,
         sleep: Callable[[float], None] = time.sleep,
@@ -147,6 +168,13 @@ class BuildingHubClient:
         self._service_key = key
         self._session = session if session is not None else requests.Session()
         self._owns_session = session is None
+        if self._owns_session:
+            # A service key is placed in the official gateway query string.
+            # Avoid inheriting an ambient HTTP(S) proxy configuration, which
+            # can both make a cloud deployment flaky and expose that key to an
+            # unrelated proxy.  Streamlit Community Cloud supports direct
+            # outbound HTTPS, and requests will still use its normal CA store.
+            self._session.trust_env = False
         self._timeout = timeout
         self._max_retries = max_retries
         self._backoff_factor = float(backoff_factor)
@@ -277,12 +305,21 @@ class BuildingHubClient:
                     params=request_params,
                     timeout=self._timeout,
                 )
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as error:
                 if attempt < self._max_retries:
                     self._backoff(attempt)
                     continue
+                reason = self._network_failure_reason(error)
+                LOGGER.warning(
+                    "BuildingHUB request failed endpoint=%s reason=%s attempts=%s",
+                    endpoint,
+                    reason,
+                    attempt + 1,
+                )
                 raise BuildingHubNetworkError(
-                    "Building HUB request failed after retrying"
+                    endpoint=endpoint,
+                    attempts=attempt + 1,
+                    reason=reason,
                 ) from None
 
             status = getattr(response, "status_code", None)
@@ -583,6 +620,26 @@ class BuildingHubClient:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _network_failure_reason(error: requests.exceptions.RequestException) -> str:
+        """Return a stable, non-sensitive category for an HTTP failure."""
+
+        if isinstance(error, requests.exceptions.ConnectTimeout):
+            return "connect_timeout"
+        if isinstance(error, requests.exceptions.ReadTimeout):
+            return "read_timeout"
+        if isinstance(error, requests.exceptions.Timeout):
+            return "timeout"
+        if isinstance(error, requests.exceptions.SSLError):
+            return "tls"
+        if isinstance(error, requests.exceptions.ProxyError):
+            return "proxy"
+        if isinstance(error, requests.exceptions.ChunkedEncodingError):
+            return "interrupted"
+        if isinstance(error, requests.exceptions.ConnectionError):
+            return "connection"
+        return "request"
 
     @staticmethod
     def _page_fingerprint(items: list[dict[str, Any]]) -> str:

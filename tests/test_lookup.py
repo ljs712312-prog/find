@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from src.address import LandKey
+from src.building_hub import BuildingHubAuthError, BuildingHubNetworkError
 from src.lookup import (
     AREA_ENDPOINT,
     BASIS_ENDPOINT,
@@ -18,6 +19,7 @@ from src.lookup import (
     TITLE_ENDPOINT,
     AreaCategory,
     LookupDataError,
+    UnavailableEndpoint,
     ViolationStatus,
     lookup_buildings,
     lookup_register,
@@ -52,7 +54,10 @@ class MockClient:
         **query: Any,
     ) -> Any:
         self.calls.append((endpoint, land_key, num_of_rows, query))
-        return self.responses.get(endpoint, [])
+        result = self.responses.get(endpoint, [])
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
 
 def test_fetches_all_sections_and_rejects_non_exact_land_rows() -> None:
@@ -305,6 +310,68 @@ def test_rejects_non_list_client_result_and_invalid_page_size() -> None:
         lookup_buildings(MockClient({}), LAND_KEY, num_of_rows=True)
     with pytest.raises(ValueError):
         lookup_buildings(MockClient({}), LAND_KEY, num_of_rows="100")  # type: ignore[arg-type]
+
+
+def test_optional_detail_failure_keeps_title_and_records_partial_snapshot() -> None:
+    client = MockClient(
+        {
+            TITLE_ENDPOINT: [
+                land_row(
+                    mgmBldrgstPk="TITLE-PARTIAL",
+                    regstrGbCdNm="일반",
+                    bldNm="표제부는 정상",
+                )
+            ],
+            FLOOR_ENDPOINT: BuildingHubNetworkError(
+                endpoint=FLOOR_ENDPOINT,
+                attempts=4,
+                reason="read_timeout",
+            ),
+        }
+    )
+
+    result = lookup_buildings(client, LAND_KEY)
+
+    assert [item.building_name for item in result.titles] == ["표제부는 정상"]
+    assert result.is_partial is True
+    assert result.unavailable_endpoints == (
+        UnavailableEndpoint(
+            endpoint=FLOOR_ENDPOINT,
+            reason="read_timeout",
+            attempts=4,
+        ),
+    )
+    assert FLOOR_ENDPOINT not in {
+        item.endpoint for item in result.endpoint_stats
+    }
+    assert any("상세자료를 받지 못했습니다" in warning for warning in result.warnings)
+
+
+def test_title_failure_remains_a_hard_error() -> None:
+    client = MockClient(
+        {
+            TITLE_ENDPOINT: BuildingHubNetworkError(
+                endpoint=TITLE_ENDPOINT,
+                attempts=4,
+                reason="connection",
+            )
+        }
+    )
+
+    with pytest.raises(BuildingHubNetworkError):
+        lookup_buildings(client, LAND_KEY)
+
+
+def test_optional_auth_failure_is_not_hidden_as_a_partial_result() -> None:
+    client = MockClient(
+        {
+            TITLE_ENDPOINT: [land_row(mgmBldrgstPk="TITLE-1", bldNm="정상")],
+            FLOOR_ENDPOINT: BuildingHubAuthError("30", "denied", retryable=False),
+        }
+    )
+
+    with pytest.raises(BuildingHubAuthError):
+        lookup_buildings(client, LAND_KEY)
 
 
 def test_app_facing_snapshot_surface_accepts_parsed_like_value() -> None:

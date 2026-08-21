@@ -185,7 +185,13 @@ def _friendly_api_error(error: BuildingHubError) -> str:
     if isinstance(error, BuildingHubRateLimitError):
         return "건축HUB 요청이 잠시 몰렸습니다. 잠시 후 다시 조회해 주세요."
     if isinstance(error, BuildingHubNetworkError):
-        return "건축HUB 서버에 연결하지 못했습니다."
+        if error.reason in {"connect_timeout", "read_timeout", "timeout"}:
+            return "건축HUB 응답이 지연되어 자동 재시도 후에도 완료되지 않았습니다."
+        if error.reason == "tls":
+            return "건축HUB 보안 연결을 만들지 못했습니다. 잠시 후 다시 조회해 주세요."
+        if error.reason == "proxy":
+            return "건축HUB 연결 경로에 일시적인 문제가 있습니다. 잠시 후 다시 조회해 주세요."
+        return "건축HUB와의 네트워크 연결이 일시적으로 끊겼습니다."
     if isinstance(error, BuildingHubHTTPError):
         return f"건축HUB가 HTTP {error.status_code} 오류로 응답했습니다."
     if isinstance(error, BuildingHubAPIError):
@@ -223,12 +229,18 @@ def _search(
     parsed = parse_address(query)
     if service_key:
         try:
-            snapshot = _lookup_api_cached(
+            cache_args = (
                 *_land_args(parsed.land_key),
                 LOOKUP_CACHE_SCHEMA,
                 _key_fingerprint(service_key),
                 service_key,
             )
+            snapshot = _lookup_api_cached(*cache_args)
+            # Do not hold an incomplete gateway response for the normal six
+            # hour cache lifetime.  The result remains visible for this run,
+            # but the next explicit search retries only this parcel's entry.
+            if snapshot.is_partial:
+                _lookup_api_cached.clear(*cache_args)
         except BuildingHubError as error:
             api_error = _friendly_api_error(error)
         else:
@@ -1005,7 +1017,12 @@ def _render_metrics(building: TitleSummary) -> None:
             )
 
 
-def _render_building(building: TitleSummary, index: int) -> None:
+def _render_building(
+    building: TitleSummary,
+    index: int,
+    *,
+    unavailable_endpoints: frozenset[str] = frozenset(),
+) -> None:
     label_parts = tuple(
         dict.fromkeys(
             part
@@ -1040,6 +1057,10 @@ def _render_building(building: TitleSummary, index: int) -> None:
                 hide_index=True,
                 width="stretch",
             )
+        elif "getBrFlrOulnInfo" in unavailable_endpoints:
+            st.warning(
+                "층별개요 API 응답이 이번 조회에서 지연되어 층별 정보는 표시하지 않습니다."
+            )
         else:
             st.info("이 건축물의 층별개요가 공개 API에 없습니다.")
 
@@ -1055,8 +1076,21 @@ def _render_building(building: TitleSummary, index: int) -> None:
                 "전유·공용 면적은 호실 관리 PK가 같은 모든 면적 행을 구분해 합산했습니다. "
                 "‘전유+공용’은 앱의 참고 계산값입니다."
             )
+            if "getBrExposPubuseAreaInfo" in unavailable_endpoints:
+                st.warning(
+                    "전유·공용면적 API 응답이 지연되어 일부 호실 면적이 비어 있을 수 있습니다."
+                )
         elif building.is_collective:
-            st.warning("집합건물이지만 공개 API에서 이 표제부에 연결되는 전유부를 확인하지 못했습니다.")
+            if {
+                "getBrBasisOulnInfo",
+                "getBrExposInfo",
+                "getBrExposPubuseAreaInfo",
+            } & unavailable_endpoints:
+                st.warning(
+                    "호실·면적 상세 API 응답이 지연되어 이 표제부의 전유부 연결은 이번에 확인하지 못했습니다."
+                )
+            else:
+                st.warning("집합건물이지만 공개 API에서 이 표제부에 연결되는 전유부를 확인하지 못했습니다.")
 
         if building.is_multi_family_house:
             st.warning(
@@ -1073,14 +1107,41 @@ def _render_api(outcome: SearchOutcome) -> None:
         _render_violation(outcome.parsed)
         return
 
-    st.success(f"공식 건축HUB에서 건축물 {len(snapshot.buildings)}건을 확인했습니다.")
+    unavailable_snapshot_endpoints = tuple(
+        getattr(snapshot, "unavailable_endpoints", ())
+    )
+    if unavailable_snapshot_endpoints:
+        label_by_endpoint = {
+            "getBrBasisOulnInfo": "기본개요",
+            "getBrRecapTitleInfo": "총괄표제부",
+            "getBrFlrOulnInfo": "층별개요",
+            "getBrExposInfo": "전유부",
+            "getBrExposPubuseAreaInfo": "전유·공용면적",
+        }
+        delayed = ", ".join(
+            label_by_endpoint.get(item.endpoint, item.endpoint)
+            for item in unavailable_snapshot_endpoints
+        )
+        st.warning(
+            f"건축HUB 상세자료 일부({delayed})가 일시 지연되었습니다. "
+            "표제부 중심 결과를 먼저 표시하며, 다시 조회하면 자동으로 보완됩니다."
+        )
+    else:
+        st.success(f"공식 건축HUB에서 건축물 {len(snapshot.buildings)}건을 확인했습니다.")
     st.caption(
         f"정규화 주소: {outcome.parsed.canonical_address} · "
         f"대장 레코드 생성일: {_date(snapshot.source_as_of)} · 월간 갱신 API"
     )
     _render_violation(outcome.parsed)
+    unavailable_endpoints = frozenset(
+        item.endpoint for item in unavailable_snapshot_endpoints
+    )
     for index, building in enumerate(snapshot.buildings):
-        _render_building(building, index)
+        _render_building(
+            building,
+            index,
+            unavailable_endpoints=unavailable_endpoints,
+        )
     _render_permit_reference(outcome)
 
     if snapshot.warnings:

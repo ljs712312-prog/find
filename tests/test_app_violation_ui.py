@@ -86,3 +86,26 @@ def test_portal_button_is_available_when_buildinghub_returns_no_buildings() -> N
     assert "경기부동산포털 1차 확인" in [
         button.label for button in app.button
     ]
+
+
+def test_partial_buildinghub_snapshot_keeps_title_and_explains_missing_detail() -> None:
+    outcome = _outcome()
+    partial_snapshot = SimpleNamespace(
+        buildings=outcome.snapshot.buildings,
+        warnings=("getBrFlrOulnInfo: 이번 조회에서 상세자료를 받지 못했습니다.",),
+        source_as_of="20260813",
+        unavailable_endpoints=(
+            SimpleNamespace(endpoint="getBrFlrOulnInfo"),
+        ),
+    )
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app.session_state["search_outcome"] = SearchOutcome(
+        parsed=outcome.parsed,
+        snapshot=partial_snapshot,
+    )
+    app.run()
+
+    assert not app.exception
+    rendered_warnings = " ".join(item.value for item in app.warning)
+    assert "층별개요" in rendered_warnings
+    assert "층별 정보는 표시하지 않습니다" in rendered_warnings

@@ -22,6 +22,15 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol, Sequence
 
 from .address import LandKey
+from .building_hub import (
+    BuildingHubDecodeError,
+    BuildingHubEnvelopeError,
+    BuildingHubError,
+    BuildingHubHTTPError,
+    BuildingHubNetworkError,
+    BuildingHubPaginationError,
+    BuildingHubRateLimitError,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - imported only for static type checkers
     from .building_hub import BuildingHubClient
@@ -35,13 +44,18 @@ EXPOSURE_ENDPOINT = "getBrExposInfo"
 AREA_ENDPOINT = "getBrExposPubuseAreaInfo"
 
 LOOKUP_ENDPOINTS = (
-    BASIS_ENDPOINT,
     TITLE_ENDPOINT,
+    BASIS_ENDPOINT,
     RECAP_ENDPOINT,
     FLOOR_ENDPOINT,
     EXPOSURE_ENDPOINT,
     AREA_ENDPOINT,
 )
+
+# The title table contains the building card itself.  Everything else improves
+# the card, but can safely be omitted for one query when the public gateway is
+# temporarily slow.  Auth/quota/validation failures never enter this path.
+REQUIRED_LOOKUP_ENDPOINTS = frozenset({TITLE_ENDPOINT})
 
 COLLECTIVE_UNIT_SOURCE_LABEL = "집합건물 전유부"
 EXPLICIT_API_UNIT_SOURCE_LABEL = "API 반환 호별 정보"
@@ -85,6 +99,15 @@ class EndpointStats:
     unique_count: int
     rejected_count: int
     duplicate_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class UnavailableEndpoint:
+    """A safe record of a detail endpoint omitted during a partial lookup."""
+
+    endpoint: str
+    reason: str
+    attempts: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +296,7 @@ class LookupResult:
     unlinked_units: tuple[UnitSummary, ...]
     violation: ViolationAssessment
     endpoint_stats: tuple[EndpointStats, ...]
+    unavailable_endpoints: tuple[UnavailableEndpoint, ...]
     warnings: tuple[str, ...]
     source_as_of: str | None
 
@@ -285,6 +309,12 @@ class LookupResult:
         """App-facing name for the joined title-level building results."""
 
         return self.titles
+
+    @property
+    def is_partial(self) -> bool:
+        """Whether one or more non-essential API sections were unavailable."""
+
+        return bool(self.unavailable_endpoints)
 
 
 # Public app-facing name.  The alias keeps one canonical immutable result type.
@@ -400,6 +430,31 @@ def _validate_and_dedupe(
         duplicate_count=len(matched) - len(unique),
     )
     return unique, stats
+
+
+def _recoverable_detail_failure(
+    endpoint: str,
+    error: BuildingHubError,
+) -> UnavailableEndpoint | None:
+    """Classify only safe-to-omit detail failures.
+
+    Authentication, quota, validation, and generic API application failures
+    must remain hard errors; displaying a partial result for those conditions
+    would conceal a deployment configuration issue.
+    """
+
+    if isinstance(error, BuildingHubNetworkError):
+        return UnavailableEndpoint(endpoint, error.reason, error.attempts)
+    if isinstance(error, BuildingHubRateLimitError):
+        return UnavailableEndpoint(endpoint, "rate_limited")
+    if isinstance(error, BuildingHubHTTPError) and error.retryable:
+        return UnavailableEndpoint(endpoint, "gateway_http")
+    if isinstance(
+        error,
+        (BuildingHubDecodeError, BuildingHubEnvelopeError, BuildingHubPaginationError),
+    ):
+        return UnavailableEndpoint(endpoint, "invalid_response")
+    return None
 
 
 def _classify_area(row: Mapping[str, Any]) -> AreaCategory:
@@ -628,9 +683,22 @@ def lookup_buildings(
 
     rows_by_endpoint: dict[str, list[Mapping[str, Any]]] = {}
     stats: list[EndpointStats] = []
+    unavailable_endpoints: list[UnavailableEndpoint] = []
     warnings: list[str] = []
     for endpoint in LOOKUP_ENDPOINTS:
-        raw_rows = client.fetch_all(endpoint, land_key, num_of_rows=num_of_rows)
+        try:
+            raw_rows = client.fetch_all(endpoint, land_key, num_of_rows=num_of_rows)
+        except BuildingHubError as error:
+            unavailable = _recoverable_detail_failure(endpoint, error)
+            if endpoint in REQUIRED_LOOKUP_ENDPOINTS or unavailable is None:
+                raise
+            rows_by_endpoint[endpoint] = []
+            unavailable_endpoints.append(unavailable)
+            warnings.append(
+                f"{endpoint}: 이번 조회에서 상세자료를 받지 못했습니다. "
+                "다시 조회하면 자동으로 보완됩니다."
+            )
+            continue
         rows, endpoint_stats = _validate_and_dedupe(endpoint, raw_rows, land_key)
         rows_by_endpoint[endpoint] = rows
         stats.append(endpoint_stats)
@@ -764,6 +832,7 @@ def lookup_buildings(
         unlinked_units=tuple(unlinked_units),
         violation=ViolationAssessment(),
         endpoint_stats=tuple(stats),
+        unavailable_endpoints=tuple(unavailable_endpoints),
         warnings=tuple(warnings),
         source_as_of=_source_as_of(rows_by_endpoint.values()),
     )
