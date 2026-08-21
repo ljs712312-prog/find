@@ -22,11 +22,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Apply zero-extra-secret relay patch when present
+      - name: Apply temporary verified patches when present
+        shell: bash
         run: |
-          if [ -f scripts/apply_zero_secret_patch.py ]; then
-            python scripts/apply_zero_secret_patch.py
-          fi
+          shopt -s nullglob
+          for patch in scripts/apply_*_patch.py; do
+            python "$patch"
+          done
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
       - run: ruff check app.py src tests relay
@@ -59,5 +61,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- src/building_hub.py tests/test_building_hub.py
           git diff --cached --check
-          git commit -m "Allow relay URL without extra Streamlit secret"
+          git commit -m "Use public relay URL deployment default"
           git push origin HEAD:${{ github.head_ref }}
