@@ -53,8 +53,11 @@ BUILDING_HUB_API_KEY = "..."
 
 ```toml
 # Streamlit Cloud → 건축HUB 직접 연결이 지속적으로 실패할 때만 사용합니다.
-# 무료 운영은 relay/cloudflare-worker/README.md의 Workers 배포 절차를 먼저 완료한 뒤 두 값을 함께 지정합니다.
+# 무료 Worker URL만 있으면 별도 HMAC secret 없이 기존 BUILDING_HUB_API_KEY에서
+# 서버 내부적으로 중계 서명키를 파생합니다.
 # BUILDING_HUB_RELAY_URL = "https://your-relay.workers.dev"
+
+# 기존 배포와의 하위 호환용 명시적 HMAC secret. 새 무료 배포에는 불필요합니다.
 # BUILDING_HUB_RELAY_HMAC_SECRET = "long-random-secret"
 
 # 건축인허가 서비스가 별도 인증키를 쓰는 경우에만 지정합니다.
@@ -74,10 +77,13 @@ VWORLD_DOMAIN = "won-top-finder-work.streamlit.app"
 공식 API에 직접 연결하고, TCP 연결·TLS 연결 실패에만 서명된 중계로 자동
 전환합니다. 인증·할당량·API 오류나 응답 지연에는 중계로 전환하지 않습니다.
 
-중계 서버에는 `DATA_GO_SERVICE_KEY`를 secret으로 저장하고, Streamlit에는 기존
-`BUILDING_HUB_API_KEY`와 중계 URL·별도 HMAC 비밀값을 둡니다. 브라우저가 중계
-서버를 직접 호출하거나 API 키를 중계 요청으로 전달하지 않습니다. 무료 배포·운영
-절차는 `relay/cloudflare-worker/README.md`를 따르세요.
+Worker에는 `DATA_GO_SERVICE_KEY`만 secret으로 저장합니다. Streamlit은 기존
+`BUILDING_HUB_API_KEY`를 그대로 유지하며, 별도 HMAC secret 없이 같은 키에서
+도메인 분리된 서명키를 서버 내부적으로 파생합니다. API 키 원문은 중계 요청에
+포함되지 않습니다. 배포된 공개 Worker URL은 `src/relay_config.py`에 넣을 수 있어
+Streamlit Community Cloud의 Secrets 화면을 따로 수정하지 않아도 GitHub 재배포로
+반영할 수 있습니다. 자세한 무료 배포 절차는 `relay/cloudflare-worker/README.md`를
+따르세요.
 
 ## 테스트
 
@@ -117,4 +123,10 @@ Streamlit Community Cloud에서 `apis.data.go.kr` 직접 연결이 `connect_time
 
 추가 결제 없이 운영하려면 `relay/cloudflare-worker/`의 Cloudflare Workers Free 중계를 사용하세요. 기존 `BUILDING_HUB_API_KEY` 직접 호출이 항상 1순위이며, 중계는 네트워크 연결 장애 때만 사용됩니다. GCP Cloud Run은 필수가 아니며 `relay/`의 FastAPI 구현은 유료/대체 배포 옵션으로만 남겨둡니다.
 
-배포 순서는 `relay/cloudflare-worker/README.md`를 따릅니다.
+Windows에서는 현재 폴더와 관계없이 다음 부트스트랩 명령을 사용할 수 있습니다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/ljs712312-prog/find/main/scripts/bootstrap_cloudflare_worker.ps1' | iex"
+```
+
+배포 후 출력되는 공개 `workers.dev` URL만 `src/relay_config.py`에 반영하면 Streamlit은 GitHub 배포를 통해 자동으로 해당 중계를 사용할 수 있습니다.
