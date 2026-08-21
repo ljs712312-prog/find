@@ -18,6 +18,7 @@ const PAGING_FIELDS = new Set(["pageNo", "numOfRows", "_type"]);
 const MAX_BODY_BYTES = 8192;
 const MAX_RESPONSE_BYTES = 1_000_000;
 const MAX_CLOCK_SKEW_SECONDS = 300;
+const HMAC_DERIVATION_PREFIX = "buildinghub-relay-v1\u0000";
 const encoder = new TextEncoder();
 
 export default {
@@ -32,7 +33,7 @@ export default {
       return jsonResponse({ error: "not_found" }, 404);
     }
 
-    if (!env.DATA_GO_SERVICE_KEY || !env.RELAY_HMAC_SECRET) {
+    if (!env.DATA_GO_SERVICE_KEY) {
       return jsonResponse({ error: "relay_not_configured" }, 503);
     }
 
@@ -138,6 +139,13 @@ export function canonicalJson(value) {
   throw new TypeError("unsupported JSON value");
 }
 
+async function relayHmacSecret(env) {
+  if (env.RELAY_HMAC_SECRET) return String(env.RELAY_HMAC_SECRET);
+  const material = encoder.encode(`${HMAC_DERIVATION_PREFIX}${String(env.DATA_GO_SERVICE_KEY)}`);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", material));
+  return [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function authenticateRequest(headers, endpoint, body, env) {
   const timestamp = headers.get("x-building-hub-timestamp") || "";
   const nonce = headers.get("x-building-hub-nonce") || "";
@@ -151,7 +159,7 @@ async function authenticateRequest(headers, endpoint, body, env) {
   const signed = `${timestamp}\n${nonce}\n${endpoint}\n${canonicalJson(body)}`;
   const key = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(String(env.RELAY_HMAC_SECRET)),
+    encoder.encode(await relayHmacSecret(env)),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
