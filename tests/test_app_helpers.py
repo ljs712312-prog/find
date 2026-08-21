@@ -11,6 +11,7 @@ from app import (
     _metric_cards,
     _permit_unit_table,
     _portal_status_text,
+    _relay_fingerprint,
     _sum_int_fields,
     _unit_floor_label,
     _unit_total,
@@ -21,6 +22,7 @@ from src.building_hub import (
     BuildingHubAPIError,
     BuildingHubAuthError,
     BuildingHubNetworkError,
+    BuildingHubValidationError,
 )
 from src.gyeonggi_portal import PortalBuildingReference, PortalBuildingState
 from src.permit_lookup import PermitUnitReference
@@ -64,6 +66,18 @@ def test_network_error_explains_delay_without_raw_request_data() -> None:
     assert "표제부" in message
     assert "응답하지 않았습니다" in message
     assert "getBrTitleInfo" not in message
+
+
+def test_relay_configuration_error_and_cache_identity_are_safe() -> None:
+    secret = "relay-secret-which-is-longer-than-thirty-two-characters"
+    direct = _relay_fingerprint(None, None)
+    relay = _relay_fingerprint("https://relay.example.com", secret)
+
+    assert direct != relay
+    assert secret not in relay
+    assert "중계 서버 설정" in _friendly_api_error(
+        BuildingHubValidationError("relay pair is incomplete")
+    )
 
 
 def test_partial_snapshot_is_not_kept_in_the_long_lived_lookup_cache(

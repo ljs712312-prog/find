@@ -52,6 +52,11 @@ BUILDING_HUB_API_KEY = "..."
 선택 secret:
 
 ```toml
+# Streamlit Cloud → 건축HUB 직접 연결이 지속적으로 실패할 때만 사용합니다.
+# relay/ README의 Cloud Run 배포 절차를 먼저 완료한 뒤 두 값을 함께 지정합니다.
+# BUILDING_HUB_RELAY_URL = "https://your-relay-xxxxx.run.app"
+# BUILDING_HUB_RELAY_HMAC_SECRET = "long-random-secret"
+
 # 건축인허가 서비스가 별도 인증키를 쓰는 경우에만 지정합니다.
 # 생략하면 BUILDING_HUB_API_KEY를 재사용합니다.
 ARCH_PMS_HUB_API_KEY = "..."
@@ -60,6 +65,19 @@ VWORLD_DOMAIN = "won-top-finder-work.streamlit.app"
 ```
 
 키를 저장소, 로그, 오류 메시지 또는 화면에 출력하지 마세요.
+
+### Streamlit Cloud 연결 중계(선택)
+
+공식 건축HUB URL은 `https://apis.data.go.kr/1613000/BldRgstHubService`입니다.
+직접 연결이 지속적으로 `connect_timeout`으로 실패하는 배포 환경에서만 이
+저장소의 `relay/` 서비스를 국내 리전에 배포해 사용할 수 있습니다. 앱은 먼저
+공식 API에 직접 연결하고, TCP 연결·TLS 연결 실패에만 서명된 중계로 자동
+전환합니다. 인증·할당량·API 오류나 응답 지연에는 중계로 전환하지 않습니다.
+
+중계 서버에는 `DATA_GO_SERVICE_KEY`만 저장하고, Streamlit에는 중계 URL과
+별도 HMAC 비밀값만 넣습니다. 브라우저가 중계 서버를 직접 호출하거나 API 키를
+중계 요청으로 전달하지 않습니다. 상세 배포·운영 절차는 `relay/README.md`를
+따르세요.
 
 ## 테스트
 
