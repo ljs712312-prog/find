@@ -6,15 +6,13 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -22,13 +20,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Apply temporary verified patches when present
-        shell: bash
-        run: |
-          shopt -s nullglob
-          for patch in scripts/apply_*_patch.py; do
-            python "$patch"
-          done
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
       - run: ruff check app.py src tests relay
@@ -51,15 +42,3 @@ jobs:
               }
             }
           }
-      - name: Persist generated backend patch
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          if git diff --quiet -- src/building_hub.py tests/test_building_hub.py; then
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- src/building_hub.py tests/test_building_hub.py
-          git diff --cached --check
-          git commit -m "Use public relay URL deployment default"
-          git push origin HEAD:${{ github.head_ref }}
