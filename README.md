@@ -69,8 +69,8 @@ VWORLD_DOMAIN = "won-top-finder-work.streamlit.app"
 ### Streamlit Cloud 연결 중계(선택)
 
 공식 건축HUB URL은 `https://apis.data.go.kr/1613000/BldRgstHubService`입니다.
-직접 연결이 지속적으로 `connect_timeout`으로 실패하는 배포 환경에서만 이
-추가 결제가 없는 운영은 `relay/cloudflare-worker/`의 Cloudflare Workers Free 중계를 권장합니다. 앱은 먼저
+직접 연결이 지속적으로 `connect_timeout`으로 실패하는 배포 환경에서는
+추가 결제가 없는 운영을 위해 `relay/cloudflare-worker/`의 Cloudflare Workers Free 중계를 권장합니다. 앱은 먼저
 공식 API에 직접 연결하고, TCP 연결·TLS 연결 실패에만 서명된 중계로 자동
 전환합니다. 인증·할당량·API 오류나 응답 지연에는 중계로 전환하지 않습니다.
 
