@@ -347,6 +347,29 @@ def test_optional_detail_failure_keeps_title_and_records_partial_snapshot() -> N
     assert any("상세자료를 받지 못했습니다" in warning for warning in result.warnings)
 
 
+def test_network_path_failure_skips_remaining_optional_endpoints() -> None:
+    client = MockClient(
+        {
+            TITLE_ENDPOINT: [land_row(mgmBldrgstPk="TITLE-FAST-FALLBACK")],
+            BASIS_ENDPOINT: BuildingHubNetworkError(
+                endpoint=BASIS_ENDPOINT,
+                attempts=4,
+                reason="connect_timeout",
+            ),
+        }
+    )
+
+    result = lookup_buildings(client, LAND_KEY)
+
+    assert result.is_partial is True
+    assert [item.endpoint for item in result.unavailable_endpoints] == list(
+        LOOKUP_ENDPOINTS[1:]
+    )
+    assert result.unavailable_endpoints[0].attempts == 4
+    assert all(item.attempts == 0 for item in result.unavailable_endpoints[1:])
+    assert [call[0] for call in client.calls] == [TITLE_ENDPOINT, BASIS_ENDPOINT]
+
+
 def test_title_failure_remains_a_hard_error() -> None:
     client = MockClient(
         {

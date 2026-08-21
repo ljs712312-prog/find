@@ -11,7 +11,6 @@ from app import (
     _metric_cards,
     _permit_unit_table,
     _portal_status_text,
-    _relay_fingerprint,
     _sum_int_fields,
     _unit_floor_label,
     _unit_total,
@@ -68,15 +67,9 @@ def test_network_error_explains_delay_without_raw_request_data() -> None:
     assert "getBrTitleInfo" not in message
 
 
-def test_relay_configuration_error_and_cache_identity_are_safe() -> None:
-    secret = "relay-secret-which-is-longer-than-thirty-two-characters"
-    direct = _relay_fingerprint(None, None)
-    relay = _relay_fingerprint("https://relay.example.com", secret)
-
-    assert direct != relay
-    assert secret not in relay
-    assert "중계 서버 설정" in _friendly_api_error(
-        BuildingHubValidationError("relay pair is incomplete")
+def test_validation_error_is_user_friendly() -> None:
+    assert "요청 설정" in _friendly_api_error(
+        BuildingHubValidationError("invalid request")
     )
 
 

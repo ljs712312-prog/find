@@ -17,28 +17,6 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
-      - run: ruff check app.py src tests relay
-      - run: npm test --prefix relay/cloudflare-worker
-      - name: Parse Cloudflare deployment helpers
-        shell: pwsh
-        run: |
-          foreach ($path in @('scripts/deploy_cloudflare_worker.ps1', 'scripts/bootstrap_cloudflare_worker.ps1')) {
-            if (Test-Path $path) {
-              $tokens = $null
-              $errors = $null
-              [System.Management.Automation.Language.Parser]::ParseFile(
-                (Resolve-Path $path),
-                [ref]$tokens,
-                [ref]$errors
-              ) | Out-Null
-              if ($errors.Count -gt 0) {
-                $errors | ForEach-Object { Write-Error "$path : $($_.Message)" }
-                exit 1
-              }
-            }
-          }
+      - run: ruff check app.py src tests
