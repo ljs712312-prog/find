@@ -24,3 +24,17 @@ jobs:
       - run: python -m pytest -q
       - run: ruff check app.py src tests relay
       - run: npm test --prefix relay/cloudflare-worker
+      - name: Parse Cloudflare deployment helper
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/deploy_cloudflare_worker.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
