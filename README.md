@@ -53,8 +53,8 @@ BUILDING_HUB_API_KEY = "..."
 
 ```toml
 # Streamlit Cloud → 건축HUB 직접 연결이 지속적으로 실패할 때만 사용합니다.
-# relay/ README의 Cloud Run 배포 절차를 먼저 완료한 뒤 두 값을 함께 지정합니다.
-# BUILDING_HUB_RELAY_URL = "https://your-relay-xxxxx.run.app"
+# 무료 운영은 relay/cloudflare-worker/README.md의 Workers 배포 절차를 먼저 완료한 뒤 두 값을 함께 지정합니다.
+# BUILDING_HUB_RELAY_URL = "https://your-relay.workers.dev"
 # BUILDING_HUB_RELAY_HMAC_SECRET = "long-random-secret"
 
 # 건축인허가 서비스가 별도 인증키를 쓰는 경우에만 지정합니다.
@@ -69,15 +69,15 @@ VWORLD_DOMAIN = "won-top-finder-work.streamlit.app"
 ### Streamlit Cloud 연결 중계(선택)
 
 공식 건축HUB URL은 `https://apis.data.go.kr/1613000/BldRgstHubService`입니다.
-직접 연결이 지속적으로 `connect_timeout`으로 실패하는 배포 환경에서만 이
-저장소의 `relay/` 서비스를 국내 리전에 배포해 사용할 수 있습니다. 앱은 먼저
+직접 연결이 지속적으로 `connect_timeout`으로 실패하는 배포 환경에서는
+추가 결제가 없는 운영을 위해 `relay/cloudflare-worker/`의 Cloudflare Workers Free 중계를 권장합니다. 앱은 먼저
 공식 API에 직접 연결하고, TCP 연결·TLS 연결 실패에만 서명된 중계로 자동
 전환합니다. 인증·할당량·API 오류나 응답 지연에는 중계로 전환하지 않습니다.
 
-중계 서버에는 `DATA_GO_SERVICE_KEY`만 저장하고, Streamlit에는 중계 URL과
-별도 HMAC 비밀값만 넣습니다. 브라우저가 중계 서버를 직접 호출하거나 API 키를
-중계 요청으로 전달하지 않습니다. 상세 배포·운영 절차는 `relay/README.md`를
-따르세요.
+중계 서버에는 `DATA_GO_SERVICE_KEY`를 secret으로 저장하고, Streamlit에는 기존
+`BUILDING_HUB_API_KEY`와 중계 URL·별도 HMAC 비밀값을 둡니다. 브라우저가 중계
+서버를 직접 호출하거나 API 키를 중계 요청으로 전달하지 않습니다. 무료 배포·운영
+절차는 `relay/cloudflare-worker/README.md`를 따르세요.
 
 ## 테스트
 
@@ -110,3 +110,11 @@ ruff check app.py src tests
 - 경기부동산포털의 건축물 표시 여부는 지원되는 위반정보 API가 아니며,
   적법·위반 판정에 사용할 수 없습니다.
 - 이 앱의 결과는 공식 증명서가 아닙니다.
+
+## Streamlit Cloud 건축HUB 연결 장애: 무료 중계 경로
+
+Streamlit Community Cloud에서 `apis.data.go.kr` 직접 연결이 `connect_timeout`, DNS/connection, TLS 단계에서만 실패할 경우, 앱은 선택적으로 서명된 중계로 전환할 수 있습니다.
+
+추가 결제 없이 운영하려면 `relay/cloudflare-worker/`의 Cloudflare Workers Free 중계를 사용하세요. 기존 `BUILDING_HUB_API_KEY` 직접 호출이 항상 1순위이며, 중계는 네트워크 연결 장애 때만 사용됩니다. GCP Cloud Run은 필수가 아니며 `relay/`의 FastAPI 구현은 유료/대체 배포 옵션으로만 남겨둡니다.
+
+배포 순서는 `relay/cloudflare-worker/README.md`를 따릅니다.

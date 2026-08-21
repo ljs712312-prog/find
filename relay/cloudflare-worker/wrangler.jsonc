@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "won-top-buildinghub-relay",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-08-21",
+  "placement": {
+    "hostname": "apis.data.go.kr"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
