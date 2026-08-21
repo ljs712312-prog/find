@@ -6,13 +6,15 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -20,21 +22,42 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Apply zero-extra-secret relay patch when present
+        run: |
+          if [ -f scripts/apply_zero_secret_patch.py ]; then
+            python scripts/apply_zero_secret_patch.py
+          fi
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
       - run: ruff check app.py src tests relay
       - run: npm test --prefix relay/cloudflare-worker
-      - name: Parse Cloudflare deployment helper
+      - name: Parse Cloudflare deployment helpers
         shell: pwsh
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path 'scripts/deploy_cloudflare_worker.ps1'),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Error $_.Message }
-            exit 1
+          foreach ($path in @('scripts/deploy_cloudflare_worker.ps1', 'scripts/bootstrap_cloudflare_worker.ps1')) {
+            if (Test-Path $path) {
+              $tokens = $null
+              $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile(
+                (Resolve-Path $path),
+                [ref]$tokens,
+                [ref]$errors
+              ) | Out-Null
+              if ($errors.Count -gt 0) {
+                $errors | ForEach-Object { Write-Error "$path : $($_.Message)" }
+                exit 1
+              }
+            }
           }
+      - name: Persist generated backend patch
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          if git diff --quiet -- src/building_hub.py tests/test_building_hub.py; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- src/building_hub.py tests/test_building_hub.py
+          git diff --cached --check
+          git commit -m "Allow relay URL without extra Streamlit secret"
+          git push origin HEAD:${{ github.head_ref }}
