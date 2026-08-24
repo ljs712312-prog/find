@@ -352,7 +352,13 @@ class BuildingHubClient:
             except requests.exceptions.RequestException as error:
                 reason = self._network_failure_reason(error)
                 if self._should_fallback_to_relay(reason):
-                    LOGGER.info(
+                    log_fallback = (
+                        LOGGER.warning
+                        if reason
+                        in {"read_timeout", "timeout", "interrupted", "request"}
+                        else LOGGER.info
+                    )
+                    log_fallback(
                         "BuildingHUB direct transport failed; using signed relay "
                         "endpoint=%s reason=%s direct_attempts=%s",
                         endpoint,
