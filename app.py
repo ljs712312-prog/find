@@ -46,8 +46,11 @@ from src.relay_config import DEFAULT_BUILDING_HUB_RELAY_URL
 from src.realty_price import (
     COLLECTIVE_HOUSING_PRICE_URL,
     INDIVIDUAL_HOUSING_PRICE_URL,
-    INDIVIDUAL_LAND_PRICE_URL,
     REALTY_PRICE_HOME_URL,
+    CollectivePriceResult,
+    IndividualHousingPrice,
+    RealtyPriceClient,
+    RealtyPriceError,
 )
 from src.vworld import (
     ViolationReference,
@@ -71,6 +74,7 @@ PUBLIC_DATA_REQUEST_URL = (
 )
 VIOLATION_LOOKUP_STATE_KEY = "violation_lookup"
 PERMIT_LOOKUP_STATE_KEY = "permit_lookup"
+REALTY_PRICE_LOOKUP_STATE_KEY = "realty_price_lookup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +84,14 @@ class SearchOutcome:
     legacy: tuple[LegacyBuilding, ...] = ()
     api_error: str | None = None
     used_legacy: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CollectiveUnitChoice:
+    label: str
+    building_name: str
+    dong_name: str
+    ho_name: str
 
 
 def _secret(name: str) -> str | None:
@@ -187,6 +199,38 @@ def _gyeonggi_portal_cached(
 ) -> PortalBuildingReference:
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
     return GyeonggiPortalClient().get_building_reference(land_key)
+
+
+@st.cache_data(ttl=6 * 60 * 60, max_entries=512, show_spinner=False)
+def _individual_prices_cached(
+    sigungu_cd: str,
+    bjdong_cd: str,
+    plat_gb_cd: str,
+    bun: str,
+    ji: str,
+) -> tuple[IndividualHousingPrice, ...]:
+    land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
+    return RealtyPriceClient().get_individual_prices(land_key)
+
+
+@st.cache_data(ttl=6 * 60 * 60, max_entries=1024, show_spinner=False)
+def _collective_prices_cached(
+    sigungu_cd: str,
+    bjdong_cd: str,
+    plat_gb_cd: str,
+    bun: str,
+    ji: str,
+    building_name: str,
+    dong_name: str,
+    ho_name: str,
+) -> CollectivePriceResult:
+    land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
+    return RealtyPriceClient().get_collective_prices(
+        land_key,
+        building_name=building_name,
+        dong_name=dong_name,
+        ho_name=ho_name,
+    )
 
 
 def _land_args(land_key: LandKey) -> tuple[str, str, str, str, str]:
@@ -1031,43 +1075,261 @@ def _render_realty_price(
     parsed: ParsedAddress,
     buildings: Iterable[Any] | None = None,
 ) -> None:
-    """Open the correct official price search without fragile private APIs."""
+    """Render prefilled, opt-in house-price lookups for the parcel."""
 
     building_list = tuple(buildings or ())
-    has_collective = any(
-        bool(getattr(building, "is_collective", False))
+    individual_buildings = tuple(
+        building
         for building in building_list
+        if _is_individual_price_building(building)
     )
-    has_individual = any(
-        not bool(getattr(building, "is_collective", False))
+    collective_buildings = tuple(
+        building
         for building in building_list
+        if _is_collective_price_building(building)
     )
+    identity = _land_args(parsed.land_key)
+    current = st.session_state.get(REALTY_PRICE_LOOKUP_STATE_KEY)
+    if not isinstance(current, dict) or current.get("identity") != identity:
+        current = {"identity": identity}
 
-    st.markdown("### 부동산 공시가격 확인")
-    if has_collective and not has_individual:
-        st.caption("집합건물은 동·호를 선택하면 호실별 공동주택 공시가격을 볼 수 있습니다.")
-    elif has_individual and not has_collective:
-        st.caption("단독·다가구·다중주택은 지번별 개별주택 공시가격을 확인합니다.")
-    elif has_collective and has_individual:
-        st.caption("이 지번에는 대장 유형이 함께 있어 해당하는 주택가격 화면을 선택하세요.")
-    else:
-        st.caption("건축물 유형을 확인하지 못해 공시가격알리미 첫 화면을 엽니다.")
+    st.markdown("### 부동산 공시가격 조회")
+    st.caption(f"조회 지번은 자동 입력됩니다: {parsed.canonical_address}")
 
-    with st.container(horizontal=True, gap="small"):
-        if has_collective:
-            st.link_button("공동주택 공시가격 조회", COLLECTIVE_HOUSING_PRICE_URL)
-        if has_individual:
-            st.link_button("개별주택 공시가격 조회", INDIVIDUAL_HOUSING_PRICE_URL)
-        if not building_list:
-            st.link_button("공시가격알리미 열기", REALTY_PRICE_HOME_URL)
-        st.link_button("개별공시지가 조회", INDIVIDUAL_LAND_PRICE_URL)
+    if individual_buildings:
+        _render_individual_price(parsed, current)
+    if collective_buildings:
+        _render_collective_price(parsed, collective_buildings, current)
+    if not individual_buildings and not collective_buildings:
+        st.info(
+            "이 대장에서는 주택 유형을 확정하지 못했습니다. "
+            "공시가격알리미에서 공동주택 또는 개별주택을 선택해 확인해 주세요."
+        )
+        with st.container(horizontal=True, gap="small"):
+            st.link_button("공동주택가격 직접 보기", COLLECTIVE_HOUSING_PRICE_URL)
+            st.link_button("개별주택가격 직접 보기", INDIVIDUAL_HOUSING_PRICE_URL)
+            if not building_list:
+                st.link_button("공시가격알리미 열기", REALTY_PRICE_HOME_URL)
 
-    st.write("**검색할 지번**")
-    st.code(parsed.canonical_address, language=None)
     st.caption(
-        "공식 사이트의 외부 링크는 지번 자동입력을 지원하지 않아 위 주소를 복사해 검색해야 합니다. "
-        "공시가격은 실거래가나 시세가 아닙니다."
+        "부동산공시가격알리미 공개 조회 결과이며 실거래가·시세 또는 증명서가 아닙니다."
     )
+
+
+def _price_purpose_text(building: Any) -> str:
+    return " ".join(
+        str(value or "")
+        for value in (
+            getattr(building, "purpose_name", None),
+            getattr(building, "other_purpose", None),
+        )
+    )
+
+
+def _is_individual_price_building(building: Any) -> bool:
+    if bool(getattr(building, "is_collective", False)):
+        return False
+    if bool(getattr(building, "is_multi_family_house", False)):
+        return True
+    purpose = _price_purpose_text(building)
+    return any(name in purpose for name in ("단독주택", "다가구주택", "다중주택"))
+
+
+def _is_collective_price_building(building: Any) -> bool:
+    if not bool(getattr(building, "is_collective", False)):
+        return False
+    purpose = _price_purpose_text(building)
+    return not purpose or any(
+        name in purpose
+        for name in ("공동주택", "아파트", "연립주택", "다세대주택")
+    )
+
+
+def _collective_unit_choices(
+    buildings: Iterable[Any],
+) -> tuple[CollectiveUnitChoice, ...]:
+    choices: list[CollectiveUnitChoice] = []
+    seen: set[tuple[str, str, str]] = set()
+    for building in buildings:
+        building_name = str(getattr(building, "building_name", None) or "").strip()
+        default_dong = str(getattr(building, "dong_name", None) or "").strip()
+        for unit in tuple(getattr(building, "units", ()) or ()):
+            ho_name = str(getattr(unit, "ho_name", None) or "").strip()
+            if not ho_name:
+                continue
+            dong_name = str(getattr(unit, "dong_name", None) or default_dong).strip()
+            key = (building_name, dong_name, ho_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            label = " · ".join(
+                dict.fromkeys(
+                    value for value in (building_name, dong_name, ho_name) if value
+                )
+            )
+            choices.append(
+                CollectiveUnitChoice(
+                    label=label or ho_name,
+                    building_name=building_name,
+                    dong_name=dong_name,
+                    ho_name=ho_name,
+                )
+            )
+    return tuple(
+        sorted(choices, key=lambda item: _natural_key(item.label))
+    )
+
+
+def _won(amount: int) -> str:
+    return f"{amount:,}원"
+
+
+def _render_individual_price(
+    parsed: ParsedAddress,
+    current: dict[str, Any],
+) -> None:
+    st.markdown("#### 다가구·단독주택 개별주택가격")
+    st.caption("지번 전체에 공시된 하나의 개별주택가격을 조회합니다.")
+    with st.container(horizontal=True, gap="small"):
+        clicked = st.button(
+            "개별주택 공시가격 조회",
+            key=f"individual-price-{'-'.join(_land_args(parsed.land_key))}",
+        )
+        st.link_button("개별주택가격 공식 사이트", INDIVIDUAL_HOUSING_PRICE_URL)
+
+    if clicked:
+        current.pop("individual_error", None)
+        try:
+            with st.spinner("주소가 입력된 개별주택 공시가격을 조회하고 있습니다…"):
+                current["individual"] = _individual_prices_cached(
+                    *_land_args(parsed.land_key)
+                )
+        except RealtyPriceError as error:
+            current.pop("individual", None)
+            current["individual_error"] = str(error)
+        st.session_state[REALTY_PRICE_LOOKUP_STATE_KEY] = current
+
+    if current.get("individual_error"):
+        st.warning(
+            f"{current['individual_error']} 공식 사이트에서 직접 확인해 주세요."
+        )
+    prices = current.get("individual")
+    if isinstance(prices, tuple):
+        if not prices:
+            st.info("이 지번에서 공개된 개별주택 공시가격을 찾지 못했습니다.")
+            return
+        latest = prices[0]
+        st.metric(
+            f"최신 개별주택가격 · {_date(latest.base_date)}",
+            _won(latest.amount),
+        )
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "기준일": _date(item.base_date),
+                        "개별주택가격": _won(item.amount),
+                        "대지면적(㎡)": _decimal_text(item.land_area, suffix="").strip(),
+                        "건물연면적(㎡)": _decimal_text(
+                            item.building_area, suffix=""
+                        ).strip(),
+                        "주거연면적(㎡)": _decimal_text(
+                            item.residential_area, suffix=""
+                        ).strip(),
+                    }
+                    for item in prices
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+
+
+def _render_collective_price(
+    parsed: ParsedAddress,
+    buildings: Iterable[Any],
+    current: dict[str, Any],
+) -> None:
+    st.markdown("#### 다세대·공동주택 호실별 가격")
+    st.caption("건축물대장의 동·호를 자동 입력해 선택한 호실의 공동주택가격을 조회합니다.")
+    choices = _collective_unit_choices(buildings)
+    if not choices:
+        st.warning(
+            "건축물대장에서 호실명을 받지 못해 자동 입력할 수 없습니다. "
+            "공식 사이트에서 동·호를 선택해 주세요."
+        )
+        st.link_button("공동주택가격 직접 보기", COLLECTIVE_HOUSING_PRICE_URL)
+        return
+
+    label_map = {choice.label: choice for choice in choices}
+    selected_label = st.selectbox(
+        "공시가격을 조회할 호실",
+        tuple(label_map),
+        key=f"collective-price-unit-{'-'.join(_land_args(parsed.land_key))}",
+    )
+    selected = label_map[selected_label]
+    selection = (
+        selected.building_name,
+        selected.dong_name,
+        selected.ho_name,
+    )
+    with st.container(horizontal=True, gap="small"):
+        clicked = st.button(
+            "선택 호실 공동주택 공시가격 조회",
+            key=f"collective-price-{'-'.join(_land_args(parsed.land_key))}",
+        )
+        st.link_button("공동주택가격 공식 사이트", COLLECTIVE_HOUSING_PRICE_URL)
+
+    if clicked:
+        current.pop("collective_error", None)
+        try:
+            with st.spinner("주소와 동·호를 입력해 공동주택 공시가격을 조회하고 있습니다…"):
+                current["collective"] = _collective_prices_cached(
+                    *_land_args(parsed.land_key),
+                    *selection,
+                )
+                current["collective_selection"] = selection
+        except RealtyPriceError as error:
+            current.pop("collective", None)
+            current["collective_selection"] = selection
+            current["collective_error"] = str(error)
+        st.session_state[REALTY_PRICE_LOOKUP_STATE_KEY] = current
+
+    if current.get("collective_selection") != selection:
+        return
+    if current.get("collective_error"):
+        st.warning(
+            f"{current['collective_error']} 공식 사이트에서 직접 확인해 주세요."
+        )
+    result = current.get("collective")
+    if isinstance(result, CollectivePriceResult):
+        if not result.prices:
+            st.info("선택한 호실에서 공개된 공동주택 공시가격을 찾지 못했습니다.")
+            return
+        latest = result.prices[0]
+        st.metric(
+            f"{result.ho_name} 최신 공동주택가격 · {_date(latest.notice_date)}",
+            _won(latest.amount),
+        )
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "기준일": _date(item.notice_date),
+                        "단지": item.complex_name,
+                        "동": item.dong_name,
+                        "호": item.ho_name,
+                        "전용면적(㎡)": _decimal_text(
+                            item.private_area, suffix=""
+                        ).strip(),
+                        "공동주택가격": _won(item.amount),
+                    }
+                    for item in result.prices
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
 
 
 def _metric_cards(
@@ -1366,6 +1628,7 @@ def render_app() -> None:
         st.session_state.pop("search_outcome", None)
         st.session_state.pop(VIOLATION_LOOKUP_STATE_KEY, None)
         st.session_state.pop(PERMIT_LOOKUP_STATE_KEY, None)
+        st.session_state.pop(REALTY_PRICE_LOOKUP_STATE_KEY, None)
         if not query.strip():
             st.error("지번 주소를 입력해 주세요.")
         else:
