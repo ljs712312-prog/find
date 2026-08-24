@@ -43,6 +43,12 @@ from src.permit_lookup import (
     lookup_permit_households,
 )
 from src.relay_config import DEFAULT_BUILDING_HUB_RELAY_URL
+from src.realty_price import (
+    COLLECTIVE_HOUSING_PRICE_URL,
+    INDIVIDUAL_HOUSING_PRICE_URL,
+    INDIVIDUAL_LAND_PRICE_URL,
+    REALTY_PRICE_HOME_URL,
+)
 from src.vworld import (
     ViolationReference,
     ViolationState,
@@ -1021,6 +1027,49 @@ def _render_violation(parsed: ParsedAddress) -> None:
         _render_vworld_reference(vworld_reference)
 
 
+def _render_realty_price(
+    parsed: ParsedAddress,
+    buildings: Iterable[Any] | None = None,
+) -> None:
+    """Open the correct official price search without fragile private APIs."""
+
+    building_list = tuple(buildings or ())
+    has_collective = any(
+        bool(getattr(building, "is_collective", False))
+        for building in building_list
+    )
+    has_individual = any(
+        not bool(getattr(building, "is_collective", False))
+        for building in building_list
+    )
+
+    st.markdown("### 부동산 공시가격 확인")
+    if has_collective and not has_individual:
+        st.caption("집합건물은 동·호를 선택하면 호실별 공동주택 공시가격을 볼 수 있습니다.")
+    elif has_individual and not has_collective:
+        st.caption("단독·다가구·다중주택은 지번별 개별주택 공시가격을 확인합니다.")
+    elif has_collective and has_individual:
+        st.caption("이 지번에는 대장 유형이 함께 있어 해당하는 주택가격 화면을 선택하세요.")
+    else:
+        st.caption("건축물 유형을 확인하지 못해 공시가격알리미 첫 화면을 엽니다.")
+
+    with st.container(horizontal=True, gap="small"):
+        if has_collective:
+            st.link_button("공동주택 공시가격 조회", COLLECTIVE_HOUSING_PRICE_URL)
+        if has_individual:
+            st.link_button("개별주택 공시가격 조회", INDIVIDUAL_HOUSING_PRICE_URL)
+        if not building_list:
+            st.link_button("공시가격알리미 열기", REALTY_PRICE_HOME_URL)
+        st.link_button("개별공시지가 조회", INDIVIDUAL_LAND_PRICE_URL)
+
+    st.write("**검색할 지번**")
+    st.code(parsed.canonical_address, language=None)
+    st.caption(
+        "공식 사이트의 외부 링크는 지번 자동입력을 지원하지 않아 위 주소를 복사해 검색해야 합니다. "
+        "공시가격은 실거래가나 시세가 아닙니다."
+    )
+
+
 def _metric_cards(
     building: TitleSummary,
 ) -> tuple[tuple[str, str, str | None], ...]:
@@ -1155,6 +1204,7 @@ def _render_api(outcome: SearchOutcome) -> None:
     if not snapshot.buildings:
         st.error("공식 API 조회 결과가 없습니다. 지번과 산번지 여부를 확인해 주세요.")
         _render_violation(outcome.parsed)
+        _render_realty_price(outcome.parsed)
         return
 
     unavailable_snapshot_endpoints = tuple(
@@ -1183,6 +1233,7 @@ def _render_api(outcome: SearchOutcome) -> None:
         f"대장 레코드 생성일: {_date(snapshot.source_as_of)} · 월간 갱신 API"
     )
     _render_violation(outcome.parsed)
+    _render_realty_price(outcome.parsed, snapshot.buildings)
     unavailable_endpoints = frozenset(
         item.endpoint for item in unavailable_snapshot_endpoints
     )
@@ -1232,6 +1283,7 @@ def _render_legacy(outcome: SearchOutcome) -> None:
         "호실면적과 위반 여부는 표시하지 않습니다."
     )
     _render_violation(outcome.parsed)
+    _render_realty_price(outcome.parsed)
     for index, building in enumerate(outcome.legacy):
         _render_legacy_building(building, index)
 
@@ -1347,6 +1399,7 @@ def render_app() -> None:
             "보조 스냅샷에도 해당 지번이 없습니다."
         )
         _render_violation(outcome.parsed)
+        _render_realty_price(outcome.parsed)
 
     with st.expander("데이터 출처와 확인 범위"):
         st.write(
