@@ -2,8 +2,10 @@
 
 The production fallback relay is deployed as the `building-hub-relay` Edge
 Function in Supabase's Seoul region. Streamlit calls the official BuildingHUB
-API directly first and uses this endpoint only for connection, TLS, proxy, or
-connect-timeout failures.
+API directly first and uses this endpoint only when no usable response arrives,
+including connection, TLS, proxy, connect-timeout, read-timeout, and interrupted
+response failures. The Streamlit client retries one transient relay transport or
+`408`/`429`/`5xx` response with a fresh timestamp and nonce.
 
 Required project secret:
 

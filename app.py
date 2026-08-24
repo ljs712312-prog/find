@@ -230,6 +230,11 @@ def _friendly_api_error(error: BuildingHubError) -> str:
             return "건축HUB 연결 경로에 일시적인 문제가 있습니다. 잠시 후 다시 조회해 주세요."
         return "건축HUB와의 네트워크 연결이 일시적으로 끊겼습니다."
     if isinstance(error, BuildingHubHTTPError):
+        if error.status_code == 429 or 500 <= error.status_code <= 599:
+            return (
+                "건축HUB가 일시적으로 응답하지 않았습니다. "
+                "자동 재시도 후에도 완료되지 않았습니다."
+            )
         return f"건축HUB가 HTTP {error.status_code} 오류로 응답했습니다."
     if isinstance(error, BuildingHubValidationError):
         return "건축HUB 또는 중계 서버 설정이 올바르지 않습니다."

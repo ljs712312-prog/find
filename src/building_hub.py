@@ -133,9 +133,24 @@ class BuildingHubClient:
     _REGISTER_BASE_URL = BASE_URL
     _RELAY_URL_ENV = "BUILDING_HUB_RELAY_URL"
     _RELAY_HMAC_SECRET_ENV = "BUILDING_HUB_RELAY_HMAC_SECRET"
+    # Every requests transport failure below means that no usable official
+    # response reached the caller. BuildingHUB operations are read-only GETs,
+    # so a signed relay retry is safe even when the direct socket connected but
+    # stalled while reading the response.
     _RELAY_FALLBACK_REASONS = frozenset(
-        {"connect_timeout", "connection", "tls", "proxy"}
+        {
+            "connect_timeout",
+            "read_timeout",
+            "timeout",
+            "connection",
+            "tls",
+            "proxy",
+            "interrupted",
+            "request",
+        }
     )
+    _RELAY_MAX_ATTEMPTS = 2
+    _RELAY_TIMEOUT = (5.0, 20.0)
 
     ENDPOINTS = frozenset(
         {
@@ -434,9 +449,9 @@ class BuildingHubClient:
         """Return whether the failed *direct* attempt may use the relay.
 
         The relay is an egress-path fallback, not a second interpretation of
-        API responses.  In particular, a response that reached BuildingHUB
-        (HTTP/API/auth/quota/rate-limit/read-timeout) must remain direct and
-        actionable instead of being hidden behind another service.
+        API responses. HTTP/API/auth/quota/rate-limit responses remain direct
+        and actionable; only failures that produced no usable response switch
+        paths.
         """
 
         return (
@@ -464,72 +479,136 @@ class BuildingHubClient:
             raise AssertionError("relay request attempted without relay configuration")
 
         body = self._canonical_json({"params": dict(params)})
-        timestamp = str(int(time.time()))
-        nonce = secrets.token_urlsafe(24)
-        signature = self._relay_signature(
-            secret=config.hmac_secret,
-            timestamp=timestamp,
-            nonce=nonce,
-            endpoint=endpoint,
-            body=body,
-        )
         url = f"{config.base_url}/v1/building-hub/{quote(endpoint, safe='')}"
-        headers = {
-            "Accept": "application/json, application/xml",
-            "Content-Type": "application/json; charset=utf-8",
-            "X-Building-Hub-Timestamp": timestamp,
-            "X-Building-Hub-Nonce": nonce,
-            "X-Building-Hub-Signature": signature,
-            # Supabase Edge Functions honor this header and execute the relay
-            # in Seoul. Other relay providers safely ignore it.
-            "X-Region": "ap-northeast-2",
-        }
 
-        try:
-            response = self._session.post(
-                url,
-                data=body,
-                headers=headers,
-                timeout=self._timeout,
-            )
-        except requests.exceptions.RequestException as error:
-            reason = self._network_failure_reason(error)
-            LOGGER.warning(
-                "BuildingHUB relay request failed endpoint=%s reason=%s attempts=%s elapsed_ms=%s",
-                endpoint,
-                reason,
-                direct_attempts + 1,
-                round((time.monotonic() - started_at) * 1000),
-            )
-            raise BuildingHubNetworkError(
+        for relay_attempt in range(1, self._RELAY_MAX_ATTEMPTS + 1):
+            # Generate a fresh signed nonce for each attempt so this remains
+            # compatible with a strict replay cache if one is enabled later.
+            timestamp = str(int(time.time()))
+            nonce = secrets.token_urlsafe(24)
+            signature = self._relay_signature(
+                secret=config.hmac_secret,
+                timestamp=timestamp,
+                nonce=nonce,
                 endpoint=endpoint,
-                attempts=direct_attempts + 1,
-                reason=reason,
-                elapsed_seconds=time.monotonic() - started_at,
-            ) from None
+                body=body,
+            )
+            headers = {
+                "Accept": "application/json, application/xml",
+                "Content-Type": "application/json; charset=utf-8",
+                "X-Building-Hub-Timestamp": timestamp,
+                "X-Building-Hub-Nonce": nonce,
+                "X-Building-Hub-Signature": signature,
+                # Supabase Edge Functions honor this header and execute the relay
+                # in Seoul. Other relay providers safely ignore it.
+                "X-Region": "ap-northeast-2",
+            }
 
-        status = getattr(response, "status_code", None)
-        if not isinstance(status, int):
-            raise BuildingHubHTTPError(0, retryable=False)
+            try:
+                response = self._session.post(
+                    url,
+                    data=body,
+                    headers=headers,
+                    timeout=self._RELAY_TIMEOUT,
+                )
+            except requests.exceptions.RequestException as error:
+                reason = self._network_failure_reason(error)
+                if relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                    LOGGER.warning(
+                        "BuildingHUB relay transport failed; retrying "
+                        "endpoint=%s reason=%s relay_attempt=%s",
+                        endpoint,
+                        reason,
+                        relay_attempt,
+                    )
+                    self._backoff(relay_attempt - 1)
+                    continue
+                LOGGER.warning(
+                    "BuildingHUB relay request failed endpoint=%s reason=%s "
+                    "attempts=%s elapsed_ms=%s",
+                    endpoint,
+                    reason,
+                    direct_attempts + relay_attempt,
+                    round((time.monotonic() - started_at) * 1000),
+                )
+                raise BuildingHubNetworkError(
+                    endpoint=endpoint,
+                    attempts=direct_attempts + relay_attempt,
+                    reason=reason,
+                    elapsed_seconds=time.monotonic() - started_at,
+                ) from None
 
-        if status < 200 or status >= 300:
-            # The relay forwards the official envelope unchanged.  Preserve an
-            # actionable upstream auth/quota/API error when one is present;
-            # otherwise expose only the relay's safe status code.
+            status = getattr(response, "status_code", None)
+            if not isinstance(status, int):
+                raise BuildingHubHTTPError(0, retryable=False)
+
+            if status < 200 or status >= 300:
+                # The relay forwards the official envelope unchanged. Preserve
+                # actionable auth/quota/API errors; retry only a generic
+                # transient relay/upstream response.
+                try:
+                    payload = self._decode_payload(response)
+                    self._extract_page(payload)
+                except BuildingHubRateLimitError:
+                    if relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                        self._backoff(
+                            relay_attempt - 1,
+                            self._retry_after(response),
+                        )
+                        continue
+                    raise
+                except (BuildingHubAuthError, BuildingHubQuotaError):
+                    raise
+                except BuildingHubAPIError:
+                    raise
+                except (BuildingHubDecodeError, BuildingHubEnvelopeError):
+                    pass
+
+                if (
+                    self._retryable_http_status(status)
+                    and relay_attempt < self._RELAY_MAX_ATTEMPTS
+                ):
+                    LOGGER.warning(
+                        "BuildingHUB relay returned transient HTTP status; retrying "
+                        "endpoint=%s status=%s relay_attempt=%s",
+                        endpoint,
+                        status,
+                        relay_attempt,
+                    )
+                    self._backoff(
+                        relay_attempt - 1,
+                        self._retry_after(response),
+                    )
+                    continue
+                raise BuildingHubHTTPError(
+                    status,
+                    retryable=self._retryable_http_status(status),
+                )
+
             try:
                 payload = self._decode_payload(response)
-                self._extract_page(payload)
-            except BuildingHubAPIError:
+                return self._extract_page(payload)
+            except BuildingHubRateLimitError:
+                if relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                    self._backoff(
+                        relay_attempt - 1,
+                        self._retry_after(response),
+                    )
+                    continue
                 raise
             except (BuildingHubDecodeError, BuildingHubEnvelopeError):
-                pass
-            raise BuildingHubHTTPError(
-                status,
-                retryable=status == 429 or 500 <= status <= 599,
-            )
+                if relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                    LOGGER.warning(
+                        "BuildingHUB relay returned an incomplete envelope; retrying "
+                        "endpoint=%s relay_attempt=%s",
+                        endpoint,
+                        relay_attempt,
+                    )
+                    self._backoff(relay_attempt - 1)
+                    continue
+                raise
 
-        payload = self._decode_payload(response)
-        return self._extract_page(payload)
+        raise AssertionError("unreachable relay retry loop")
 
     @staticmethod
     def _canonical_json(value: Mapping[str, Any]) -> str:

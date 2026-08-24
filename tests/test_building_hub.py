@@ -563,10 +563,20 @@ def test_scalar_item_is_an_envelope_error() -> None:
     "failure",
     [
         requests.ConnectTimeout("direct connect timed out"),
+        requests.ReadTimeout("direct response timed out"),
+        requests.Timeout("direct request timed out"),
         requests.ConnectionError("direct DNS lookup failed"),
         requests.exceptions.SSLError("direct TLS handshake failed"),
+        requests.exceptions.ChunkedEncodingError("direct response interrupted"),
     ],
-    ids=["connect-timeout", "connection-or-dns", "tls"],
+    ids=[
+        "connect-timeout",
+        "read-timeout",
+        "generic-timeout",
+        "connection-or-dns",
+        "tls",
+        "interrupted",
+    ],
 )
 def test_relay_is_used_immediately_for_eligible_direct_transport_failures(
     failure: requests.exceptions.RequestException,
@@ -596,7 +606,7 @@ def test_relay_is_used_immediately_for_eligible_direct_transport_failures(
         "https://building-hub-relay.example.com/edge/v1/building-hub/"
         "getBrTitleInfo"
     )
-    assert relay_call["timeout"] == (3.05, 15.0)
+    assert relay_call["timeout"] == (5.0, 20.0)
     assert json.loads(relay_call["data"]) == {
         "params": {
             "_type": "json",
@@ -627,10 +637,12 @@ def test_relay_is_used_immediately_for_eligible_direct_transport_failures(
     assert headers["X-Building-Hub-Signature"] == expected_signature
 
 
-def test_relay_does_not_run_after_direct_read_timeout() -> None:
+def test_relay_retries_a_transient_503_then_succeeds() -> None:
     sleeps: list[float] = []
     session = FakeSession(
-        *[requests.ReadTimeout("direct response timed out") for _ in range(4)]
+        requests.ReadTimeout("direct response timed out"),
+        FakeResponse(status_code=503, payload={"error": "upstream_unreachable"}),
+        FakeResponse(payload=api_payload({"mgmBldrgstPk": "recovered"})),
     )
     client = BuildingHubClient(
         KEY,
@@ -641,12 +653,60 @@ def test_relay_does_not_run_after_direct_read_timeout() -> None:
         relay_hmac_secret=RELAY_SECRET,
     )
 
+    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [
+        {"mgmBldrgstPk": "recovered"}
+    ]
+    assert [call["method"] for call in session.calls] == ["GET", "POST", "POST"]
+    assert sleeps == [0.25]
+    assert session.calls[1]["headers"]["X-Building-Hub-Nonce"] != (
+        session.calls[2]["headers"]["X-Building-Hub-Nonce"]
+    )
+
+
+def test_relay_retries_a_transport_failure_then_succeeds() -> None:
+    sleeps: list[float] = []
+    session = FakeSession(
+        requests.ConnectTimeout("direct connect timed out"),
+        requests.ReadTimeout("relay response timed out"),
+        FakeResponse(payload=api_payload({"mgmBldrgstPk": "recovered"})),
+    )
+    client = BuildingHubClient(
+        KEY,
+        session=session,
+        max_retries=3,
+        sleep=sleeps.append,
+        relay_url=RELAY_URL,
+        relay_hmac_secret=RELAY_SECRET,
+    )
+
+    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [
+        {"mgmBldrgstPk": "recovered"}
+    ]
+    assert [call["method"] for call in session.calls] == ["GET", "POST", "POST"]
+    assert sleeps == [0.25]
+
+
+def test_relay_reports_combined_attempt_count_after_repeated_transport_failure() -> None:
+    session = FakeSession(
+        requests.ConnectTimeout("direct connect timed out"),
+        requests.ReadTimeout("relay response timed out"),
+        requests.ReadTimeout("relay response timed out again"),
+    )
+    client = BuildingHubClient(
+        KEY,
+        session=session,
+        max_retries=3,
+        sleep=lambda _: None,
+        relay_url=RELAY_URL,
+        relay_hmac_secret=RELAY_SECRET,
+    )
+
     with pytest.raises(BuildingHubNetworkError) as caught:
         client.fetch_all("getBrTitleInfo", LAND_DICT)
 
     assert caught.value.reason == "read_timeout"
-    assert [call["method"] for call in session.calls] == ["GET"] * 4
-    assert sleeps == [0.25, 0.5, 1.0]
+    assert caught.value.attempts == 3
+    assert [call["method"] for call in session.calls] == ["GET", "POST", "POST"]
 
 
 @pytest.mark.parametrize(

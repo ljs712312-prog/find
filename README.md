@@ -71,10 +71,12 @@ VWORLD_DOMAIN = "won-top-finder-work.streamlit.app"
 ### Streamlit Cloud 연결 중계
 
 공식 건축HUB URL은 `https://apis.data.go.kr/1613000/BldRgstHubService`입니다.
-직접 연결이 지속적으로 `connect_timeout`으로 실패하는 배포 환경에서는
 현재 운영 배포는 무료 Supabase Edge Function을 서울 리전에서 사용합니다.
-앱은 먼저 공식 API에 직접 연결하고, TCP 연결·TLS·프록시 연결 실패에만 서명된 중계로 자동
-전환합니다. 인증·할당량·API 오류나 응답 지연에는 중계로 전환하지 않습니다.
+앱은 먼저 공식 API에 직접 연결하고, 연결·TLS·프록시·응답 읽기 지연처럼
+사용 가능한 응답을 받지 못한 전송 장애에는 서명된 중계로 자동 전환합니다.
+중계의 일시적인 타임아웃·`408`·`429`·`5xx`도 새 서명으로 한 번 더
+자동 재시도합니다. 인증·일일 할당량·요청 파라미터 오류는 반복해도 복구되지
+않으므로 재시도하거나 중계로 숨기지 않습니다.
 
 Supabase에는 `DATA_GO_SERVICE_KEY`만 secret으로 저장합니다. Streamlit은 기존
 `BUILDING_HUB_API_KEY`를 그대로 유지하며, 별도 HMAC secret 없이 같은 키에서
