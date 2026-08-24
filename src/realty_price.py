@@ -11,8 +11,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
+import hashlib
+import hmac
+import json
 import re
+import secrets
+import time
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 import requests
 
@@ -31,6 +37,44 @@ _COLLECTIVE_OPTION_URL = f"{_ORIGIN}/notice/search/searchApt.search"
 _COLLECTIVE_PRICE_URL = (
     f"{_ORIGIN}/notice/search/townPriceListPastYearMap.search"
 )
+_RELAY_ENDPOINTS = {
+    _INDIVIDUAL_SEARCH_URL: "individual",
+    _COLLECTIVE_OPTION_URL: "collective-options",
+    _COLLECTIVE_PRICE_URL: "collective-prices",
+}
+_RELAY_PARAM_FIELDS = {
+    "individual": (
+        "reg",
+        "eub",
+        "san",
+        "bun1",
+        "bun2",
+        "from_year",
+        "to_year",
+    ),
+    "collective-options": (
+        "reg",
+        "eub",
+        "bun1",
+        "bun2",
+        "year",
+        "notice_date",
+        "gbnApt",
+        "apt_code",
+        "dong_code",
+    ),
+    "collective-prices": (
+        "reg",
+        "eub",
+        "bun1",
+        "bun2",
+        "year",
+        "notice_date",
+        "apt_code",
+        "dong_code",
+        "ho_code",
+    ),
+}
 
 
 class RealtyPriceError(RuntimeError):
@@ -111,6 +155,22 @@ def _label(value: Any, *, suffix: str = "") -> str:
     return text
 
 
+def derive_relay_hmac_secret(service_key: str) -> str:
+    """Derive the existing relay credential without transmitting the API key."""
+
+    material = f"buildinghub-relay-v1\x00{service_key}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 class RealtyPriceClient:
     """Timeout-bound client for the official public price search."""
 
@@ -120,44 +180,95 @@ class RealtyPriceClient:
         session: requests.Session | None = None,
         timeout: tuple[float, float] = (3.05, 20.0),
         current_year: int | None = None,
+        relay_url: str | None = None,
+        relay_hmac_secret: str | None = None,
     ) -> None:
         self._session = session or requests.Session()
         self._timeout = timeout
         self._year = current_year or date.today().year
+        self._relay_url = self._validate_relay_url(relay_url)
+        self._relay_hmac_secret = relay_hmac_secret
+        if bool(self._relay_url) != bool(self._relay_hmac_secret):
+            raise ValueError("공시가격 중계 URL과 서명 키는 함께 설정해야 합니다.")
+        self._direct_unavailable = False
+
+    @staticmethod
+    def _validate_relay_url(value: str | None) -> str | None:
+        if value is None:
+            return None
+        url = str(value).strip().rstrip("/")
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("공시가격 중계 URL은 안전한 HTTPS 주소여야 합니다.")
+        return url
 
     def _seed(self, page_url: str) -> None:
         try:
             response = self._session.get(page_url, timeout=self._timeout)
         except requests.RequestException as exc:
+            if self._relay_url:
+                self._direct_unavailable = True
+                return
             raise RealtyPriceError("부동산공시가격알리미에 연결하지 못했습니다.") from exc
         if response.status_code != 200:
+            if self._relay_url:
+                self._direct_unavailable = True
+                return
             raise RealtyPriceError(
                 f"부동산공시가격알리미가 HTTP {response.status_code}로 응답했습니다."
             )
 
-    def _items(
+    def _relay_items(
         self,
         url: str,
         params: Mapping[str, str],
-        *,
-        referer: str,
     ) -> tuple[Mapping[str, Any], ...]:
+        endpoint = _RELAY_ENDPOINTS.get(url)
+        if not endpoint or not self._relay_url or not self._relay_hmac_secret:
+            raise RealtyPriceError("부동산공시가격알리미에 연결하지 못했습니다.")
+        relay_params = {
+            field: str(params.get(field, ""))
+            for field in _RELAY_PARAM_FIELDS[endpoint]
+        }
+        body = {"params": relay_params}
+        encoded = _canonical_json(body)
+        timestamp = str(int(time.time()))
+        nonce = secrets.token_urlsafe(24)
+        signed = f"{timestamp}\n{nonce}\nrealty-price:{endpoint}\n{encoded}"
+        signature = hmac.new(
+            self._relay_hmac_secret.encode("utf-8"),
+            signed.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
         try:
-            response = self._session.get(
-                url,
-                params=params,
+            response = self._session.post(
+                f"{self._relay_url}/v1/realty-price/{endpoint}",
+                data=encoded.encode("utf-8"),
                 headers={
-                    "Referer": referer,
-                    "X-Requested-With": "XMLHttpRequest",
+                    "Content-Type": "application/json; charset=utf-8",
+                    "X-Building-Hub-Timestamp": timestamp,
+                    "X-Building-Hub-Nonce": nonce,
+                    "X-Building-Hub-Signature": signature,
                 },
-                timeout=self._timeout,
+                timeout=(5.0, self._timeout[1]),
             )
         except requests.RequestException as exc:
-            raise RealtyPriceError("공시가격 조회 중 연결이 끊겼습니다.") from exc
+            raise RealtyPriceError("공시가격 중계 서버에 연결하지 못했습니다.") from exc
         if response.status_code != 200:
             raise RealtyPriceError(
-                f"공시가격 조회가 HTTP {response.status_code}로 실패했습니다."
+                f"공시가격 중계 조회가 HTTP {response.status_code}로 실패했습니다."
             )
+        return self._response_items(response)
+
+    @staticmethod
+    def _response_items(response: Any) -> tuple[Mapping[str, Any], ...]:
         try:
             payload = response.json()
         except (ValueError, requests.JSONDecodeError) as exc:
@@ -178,6 +289,45 @@ class RealtyPriceClient:
         ):
             raise RealtyPriceError("공시가격 목록 형식이 올바르지 않습니다.")
         return tuple(items)
+
+    def _items(
+        self,
+        url: str,
+        params: Mapping[str, str],
+        *,
+        referer: str,
+    ) -> tuple[Mapping[str, Any], ...]:
+        if self._direct_unavailable:
+            return self._relay_items(url, params)
+        try:
+            response = self._session.get(
+                url,
+                params=params,
+                headers={
+                    "Referer": referer,
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            if self._relay_url:
+                self._direct_unavailable = True
+                return self._relay_items(url, params)
+            raise RealtyPriceError("공시가격 조회 중 연결이 끊겼습니다.") from exc
+        if response.status_code != 200:
+            if self._relay_url:
+                self._direct_unavailable = True
+                return self._relay_items(url, params)
+            raise RealtyPriceError(
+                f"공시가격 조회가 HTTP {response.status_code}로 실패했습니다."
+            )
+        try:
+            return self._response_items(response)
+        except RealtyPriceError:
+            if self._relay_url:
+                self._direct_unavailable = True
+                return self._relay_items(url, params)
+            raise
 
     def get_individual_prices(
         self,

@@ -124,7 +124,7 @@ ruff check app.py src tests
 
 Streamlit Community Cloud에서 `apis.data.go.kr` 직접 연결이 `connect_timeout`, DNS/connection, TLS 단계에서만 실패할 경우, 앱은 선택적으로 서명된 중계로 전환할 수 있습니다.
 
-추가 결제 없는 현재 운영 경로는 `supabase/functions/`의 Supabase Edge Function입니다. 기존 `BUILDING_HUB_API_KEY` 직접 호출이 항상 1순위이며, 중계는 네트워크 연결 장애 때만 사용됩니다. Cloudflare Worker와 `relay/`의 FastAPI 구현은 대체 배포 옵션입니다.
+추가 결제 없는 현재 운영 경로는 `supabase/functions/`의 Supabase Edge Function입니다. 기존 `BUILDING_HUB_API_KEY` 직접 호출이 항상 1순위이며, 중계는 건축HUB 또는 부동산공시가격알리미의 네트워크 연결 장애 때만 사용됩니다. Cloudflare Worker와 `relay/`의 FastAPI 구현은 대체 배포 옵션입니다.
 
 Cloudflare 대체 배포가 필요한 경우에만 다음 부트스트랩 명령을 사용할 수 있습니다.
 

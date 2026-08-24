@@ -2,6 +2,7 @@ from decimal import Decimal
 from urllib.parse import urlparse
 
 import pytest
+import requests
 
 from src.address import LandKey
 from src.realty_price import (
@@ -10,6 +11,7 @@ from src.realty_price import (
     REALTY_PRICE_HOME_URL,
     RealtyPriceClient,
     RealtyPriceError,
+    derive_relay_hmac_secret,
 )
 
 
@@ -35,7 +37,17 @@ class FakeSession:
 
     def get(self, url, **kwargs):
         self.calls.append((url, kwargs))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def _payload(items):
@@ -185,3 +197,32 @@ def test_invalid_price_payload_is_rejected() -> None:
 
     with pytest.raises(RealtyPriceError, match="결과 모델"):
         RealtyPriceClient(session=session).get_individual_prices(LAND)
+
+
+def test_individual_lookup_uses_signed_relay_after_direct_network_failure() -> None:
+    service_key = "public-data-service-key"
+    session = FakeSession(
+        requests.ConnectTimeout("direct blocked"),
+        FakeResponse(
+            _payload(
+                [
+                    {
+                        "base_ymd": "2026/01/01",
+                        "hprice_w": "722,000,000",
+                    }
+                ]
+            )
+        ),
+    )
+    prices = RealtyPriceClient(
+        session=session,
+        current_year=2026,
+        relay_url="https://relay.example/functions/v1/building-hub-relay",
+        relay_hmac_secret=derive_relay_hmac_secret(service_key),
+    ).get_individual_prices(LAND)
+
+    assert prices[0].amount == 722_000_000
+    relay_url, relay_kwargs = session.calls[1]
+    assert relay_url.endswith("/v1/realty-price/individual")
+    assert len(relay_kwargs["headers"]["X-Building-Hub-Signature"]) == 64
+    assert service_key not in relay_kwargs["data"].decode("utf-8")

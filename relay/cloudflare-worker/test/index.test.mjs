@@ -34,6 +34,22 @@ function requestFor(endpoint, body, secret, overrides = {}, basePath = "") {
   });
 }
 
+function realtyRequestFor(endpoint, body, secret, basePath = "") {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const nonce = "realtyPriceNonceQRSTUVWX12345678";
+  const signature = sign(secret, timestamp, nonce, `realty-price:${endpoint}`, body);
+  return new Request(`https://relay.example${basePath}/v1/realty-price/${endpoint}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-building-hub-timestamp": timestamp,
+      "x-building-hub-nonce": nonce,
+      "x-building-hub-signature": signature,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
 test("canonical JSON matches sorted Python-style serialization", () => {
   assert.equal(canonicalJson({ z: 1, a: { y: 2, x: "한글" } }), '{"a":{"x":"한글","y":2},"z":1}');
 });
@@ -139,5 +155,41 @@ test("serviceKey injection in body is rejected", async () => {
   const secret = derivedSecret(serviceKey);
   const body = { params: { sigunguCd: "41110", bjdongCd: "10100", platGbCd: "0", bun: "396", ji: "30", serviceKey: "attacker" } };
   const response = await worker.fetch(requestFor("getBrTitleInfo", body, secret), { DATA_GO_SERVICE_KEY: serviceKey });
+  assert.equal(response.status, 400);
+});
+
+test("signed individual-house price request is narrowly forwarded", async () => {
+  const serviceKey = "PUBLIC-KEY";
+  const secret = derivedSecret(serviceKey);
+  const body = { params: { reg: "41111", eub: "13400", san: "1", bun1: "0396", bun2: "0030", from_year: "2005", to_year: "2026" } };
+  const originalFetch = globalThis.fetch;
+  let forwarded;
+  globalThis.fetch = async (url) => {
+    forwarded = new URL(url);
+    return new Response('{"model":{"list":[]}}', { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const response = await worker.fetch(
+      realtyRequestFor("individual", body, secret, "/functions/v1/building-hub-relay"),
+      { DATA_GO_SERVICE_KEY: serviceKey, SB_REGION: "ap-northeast-2" },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(forwarded.origin, "https://www.realtyprice.kr");
+    assert.equal(forwarded.pathname, "/notice/search/hpiSearchListApi.search");
+    assert.equal(forwarded.searchParams.get("bun1"), "0396");
+    assert.equal(forwarded.searchParams.get("serviceKey"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("realty price relay rejects unknown parameters", async () => {
+  const serviceKey = "PUBLIC-KEY";
+  const secret = derivedSecret(serviceKey);
+  const body = { params: { reg: "41111", eub: "13400", san: "1", bun1: "0396", bun2: "0030", from_year: "2005", to_year: "2026", url: "https://evil.example" } };
+  const response = await worker.fetch(
+    realtyRequestFor("individual", body, secret),
+    { DATA_GO_SERVICE_KEY: serviceKey },
+  );
   assert.equal(response.status, 400);
 });

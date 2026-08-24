@@ -51,6 +51,7 @@ from src.realty_price import (
     IndividualHousingPrice,
     RealtyPriceClient,
     RealtyPriceError,
+    derive_relay_hmac_secret,
 )
 from src.vworld import (
     ViolationReference,
@@ -208,9 +209,14 @@ def _individual_prices_cached(
     plat_gb_cd: str,
     bun: str,
     ji: str,
+    _relay_url: str | None,
+    _relay_hmac_secret: str | None,
 ) -> tuple[IndividualHousingPrice, ...]:
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
-    return RealtyPriceClient().get_individual_prices(land_key)
+    return RealtyPriceClient(
+        relay_url=_relay_url,
+        relay_hmac_secret=_relay_hmac_secret,
+    ).get_individual_prices(land_key)
 
 
 @st.cache_data(ttl=6 * 60 * 60, max_entries=1024, show_spinner=False)
@@ -223,9 +229,14 @@ def _collective_prices_cached(
     building_name: str,
     dong_name: str,
     ho_name: str,
+    _relay_url: str | None,
+    _relay_hmac_secret: str | None,
 ) -> CollectivePriceResult:
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
-    return RealtyPriceClient().get_collective_prices(
+    return RealtyPriceClient(
+        relay_url=_relay_url,
+        relay_hmac_secret=_relay_hmac_secret,
+    ).get_collective_prices(
         land_key,
         building_name=building_name,
         dong_name=dong_name,
@@ -1092,14 +1103,26 @@ def _render_realty_price(
     current = st.session_state.get(REALTY_PRICE_LOOKUP_STATE_KEY)
     if not isinstance(current, dict) or current.get("identity") != identity:
         current = {"identity": identity}
+    relay_url, relay_hmac_secret = _realty_price_relay_config()
 
     st.markdown("### 부동산 공시가격 조회")
     st.caption(f"조회 지번은 자동 입력됩니다: {parsed.canonical_address}")
 
     if individual_buildings:
-        _render_individual_price(parsed, current)
+        _render_individual_price(
+            parsed,
+            current,
+            relay_url=relay_url,
+            relay_hmac_secret=relay_hmac_secret,
+        )
     if collective_buildings:
-        _render_collective_price(parsed, collective_buildings, current)
+        _render_collective_price(
+            parsed,
+            collective_buildings,
+            current,
+            relay_url=relay_url,
+            relay_hmac_secret=relay_hmac_secret,
+        )
     if not individual_buildings and not collective_buildings:
         st.info(
             "이 대장에서는 주택 유형을 확정하지 못했습니다. "
@@ -1184,9 +1207,27 @@ def _won(amount: int) -> str:
     return f"{amount:,}원"
 
 
+def _realty_price_relay_config() -> tuple[str | None, str | None]:
+    service_key = _secret("BUILDING_HUB_API_KEY")
+    if not service_key:
+        return None, None
+    relay_url = (
+        _secret("BUILDING_HUB_RELAY_URL")
+        or DEFAULT_BUILDING_HUB_RELAY_URL
+    )
+    relay_hmac_secret = (
+        _secret("BUILDING_HUB_RELAY_HMAC_SECRET")
+        or derive_relay_hmac_secret(service_key)
+    )
+    return relay_url, relay_hmac_secret
+
+
 def _render_individual_price(
     parsed: ParsedAddress,
     current: dict[str, Any],
+    *,
+    relay_url: str | None,
+    relay_hmac_secret: str | None,
 ) -> None:
     st.markdown("#### 다가구·단독주택 개별주택가격")
     st.caption("지번 전체에 공시된 하나의 개별주택가격을 조회합니다.")
@@ -1202,7 +1243,9 @@ def _render_individual_price(
         try:
             with st.spinner("주소가 입력된 개별주택 공시가격을 조회하고 있습니다…"):
                 current["individual"] = _individual_prices_cached(
-                    *_land_args(parsed.land_key)
+                    *_land_args(parsed.land_key),
+                    relay_url,
+                    relay_hmac_secret,
                 )
         except RealtyPriceError as error:
             current.pop("individual", None)
@@ -1249,6 +1292,9 @@ def _render_collective_price(
     parsed: ParsedAddress,
     buildings: Iterable[Any],
     current: dict[str, Any],
+    *,
+    relay_url: str | None,
+    relay_hmac_secret: str | None,
 ) -> None:
     st.markdown("#### 다세대·공동주택 호실별 가격")
     st.caption("건축물대장의 동·호를 자동 입력해 선택한 호실의 공동주택가격을 조회합니다.")
@@ -1287,6 +1333,8 @@ def _render_collective_price(
                 current["collective"] = _collective_prices_cached(
                     *_land_args(parsed.land_key),
                     *selection,
+                    relay_url,
+                    relay_hmac_secret,
                 )
                 current["collective_selection"] = selection
         except RealtyPriceError as error:

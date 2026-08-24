@@ -1,4 +1,10 @@
 const UPSTREAM_BASE_URL = "https://apis.data.go.kr/1613000/BldRgstHubService";
+const REALTY_PRICE_ORIGIN = "https://www.realtyprice.kr";
+const REALTY_PRICE_ENDPOINTS = new Map([
+  ["individual", "/notice/search/hpiSearchListApi.search"],
+  ["collective-options", "/notice/search/searchApt.search"],
+  ["collective-prices", "/notice/search/townPriceListPastYearMap.search"],
+]);
 const ALLOWED_ENDPOINTS = new Set([
   "getBrTitleInfo",
   "getBrBasisOulnInfo",
@@ -33,6 +39,11 @@ export default {
       return env.DATA_GO_SERVICE_KEY
         ? jsonResponse({ status: "ready" }, 200)
         : jsonResponse({ status: "not_configured" }, 503);
+    }
+
+    const realtyMatch = url.pathname.match(/\/v1\/realty-price\/([^/]+)$/);
+    if (request.method === "POST" && realtyMatch) {
+      return relayRealtyPrice(request, env, realtyMatch[1]);
     }
 
     // Supabase prefixes function paths with `/functions/v1/<function-name>`.
@@ -141,6 +152,173 @@ export default {
     return new Response(responseBytes, { status: upstream.status, headers });
   },
 };
+
+async function relayRealtyPrice(request, env, encodedEndpoint) {
+  if (!env.DATA_GO_SERVICE_KEY) {
+    return jsonResponse({ error: "relay_not_configured" }, 503);
+  }
+
+  let endpoint;
+  try {
+    endpoint = decodeURIComponent(encodedEndpoint);
+  } catch {
+    return jsonResponse({ error: "invalid_endpoint" }, 400);
+  }
+  const upstreamPath = REALTY_PRICE_ENDPOINTS.get(endpoint);
+  if (!upstreamPath) {
+    return jsonResponse({ error: "invalid_endpoint" }, 400);
+  }
+
+  const contentLength = Number(request.headers.get("content-length") || "0");
+  if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+    return jsonResponse({ error: "request_too_large" }, 413);
+  }
+  const rawBody = await request.text();
+  if (encoder.encode(rawBody).byteLength > MAX_BODY_BYTES) {
+    return jsonResponse({ error: "request_too_large" }, 413);
+  }
+
+  let body;
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    return jsonResponse({ error: "invalid_json" }, 400);
+  }
+  if (!isPlainObject(body) || Object.keys(body).length !== 1 || !isPlainObject(body.params)) {
+    return jsonResponse({ error: "invalid_request" }, 400);
+  }
+  if (!await authenticateRequest(request.headers, `realty-price:${endpoint}`, body, env)) {
+    return jsonResponse({ error: "unauthorized" }, 401);
+  }
+
+  let params;
+  try {
+    params = validateRealtyPriceParams(endpoint, body.params);
+  } catch {
+    return jsonResponse({ error: "invalid_params" }, 400);
+  }
+
+  const upstreamUrl = new URL(`${REALTY_PRICE_ORIGIN}${upstreamPath}`);
+  for (const [key, value] of Object.entries(params)) {
+    upstreamUrl.searchParams.set(key, String(value));
+  }
+  let upstream;
+  try {
+    upstream = await fetch(upstreamUrl.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Referer: endpoint === "individual"
+          ? `${REALTY_PRICE_ORIGIN}/notice/hpindividual/search.htm`
+          : `${REALTY_PRICE_ORIGIN}/notice/town/searchPastYear.htm`,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      redirect: "manual",
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      message: "RealtyPrice upstream request failed",
+      endpoint,
+      error: error instanceof Error ? error.name : "UnknownError",
+    }));
+    return jsonResponse({ error: "upstream_unreachable" }, 503);
+  }
+  if (upstream.status >= 300 && upstream.status < 400) {
+    return jsonResponse({ error: "upstream_redirect_rejected" }, 502);
+  }
+  const responseBytes = await upstream.arrayBuffer();
+  if (responseBytes.byteLength > MAX_RESPONSE_BYTES) {
+    return jsonResponse({ error: "upstream_response_too_large" }, 502);
+  }
+  const headers = new Headers();
+  const contentType = upstream.headers.get("content-type");
+  if (contentType) headers.set("content-type", contentType);
+  if (env.SB_REGION) headers.set("x-relay-region", String(env.SB_REGION));
+  headers.set("cache-control", "no-store");
+  return new Response(responseBytes, { status: upstream.status, headers });
+}
+
+function validateRealtyPriceParams(endpoint, raw) {
+  const allowedByEndpoint = {
+    individual: new Set(["reg", "eub", "san", "bun1", "bun2", "from_year", "to_year"]),
+    "collective-options": new Set(["reg", "eub", "bun1", "bun2", "year", "notice_date", "gbnApt", "apt_code", "dong_code"]),
+    "collective-prices": new Set(["reg", "eub", "bun1", "bun2", "year", "notice_date", "apt_code", "dong_code", "ho_code"]),
+  };
+  const allowed = allowedByEndpoint[endpoint];
+  if (!allowed || Object.keys(raw).some((key) => !allowed.has(key))) {
+    throw new Error("unsupported param");
+  }
+
+  const reg = digits(raw.reg, 5, 5);
+  const eub = digits(raw.eub, 5, 5);
+  const bun = digits(raw.bun1, 1, 4);
+  const ji = digits(raw.bun2, 1, 4);
+  if (endpoint === "individual") {
+    const san = String(raw.san);
+    if (san !== "1" && san !== "2") throw new Error("san");
+    const fromYear = year(raw.from_year);
+    const toYear = year(raw.to_year);
+    if (Number(fromYear) > Number(toYear)) throw new Error("year range");
+    return {
+      page_no: "1", gbn: "1", year: "", reg, eub, san,
+      bun1: bun.padStart(4, "0"), bun2: ji.padStart(4, "0"),
+      road_code: "", p_initialword: "", build_bun1: "", build_bun2: "",
+      from_year: fromYear, to_year: toYear, dong_gbn: "", tabGbn: "Text",
+    };
+  }
+
+  const searchYear = year(raw.year);
+  const noticeDate = optionalDate(raw.notice_date);
+  const aptCode = optionalCode(raw.apt_code);
+  const dongCode = optionalCode(raw.dong_code);
+  const common = {
+    gbn: "1", year: searchYear, notice_date: noticeDate,
+    notice_date_year: `${searchYear}0430`, road_reg: "", road: "",
+    initialword: "", build_bun1: "", build_bun2: "", reg, eub,
+    apt_name: "", bun1: String(Number(bun)), bun2: String(Number(ji)),
+    apt_code: aptCode, dong_code: dongCode, ho_code: "", past_yn: "1",
+    init_gbn: "N", searchGbnRoad: "", searchGbnBunji: "1",
+    searchGbnBunjiYear: "",
+  };
+  if (endpoint === "collective-options") {
+    const stage = String(raw.gbnApt || "");
+    if (!new Set(["", "DONG", "HO"]).has(stage)) throw new Error("gbnApt");
+    if (stage === "DONG" && !aptCode) throw new Error("apt_code");
+    if (stage === "HO" && (!aptCode || !dongCode)) throw new Error("codes");
+    return { ...common, gbnApt: stage };
+  }
+
+  const hoCode = optionalCode(raw.ho_code);
+  if (!noticeDate || !aptCode || !dongCode || !hoCode) throw new Error("codes");
+  return {
+    ...common, page_no: "1", reg_name: "", sreg: "", seub: "",
+    old_reg: "", old_eub: "", ho_code: hoCode, tabGbn: "Text",
+    full_addr_name: "", dong_name: "", ho_name: "", notice_amt: "",
+    ktown_ho_seq: "", print_yn: "0", capcha: "", capcha_chk_yn: "",
+    recaptcha_token: "",
+  };
+}
+
+function year(value) {
+  const text = digits(value, 4, 4);
+  const number = Number(text);
+  if (number < 2005 || number > new Date().getUTCFullYear() + 1) throw new Error("year");
+  return text;
+}
+
+function optionalDate(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  const result = digits(text, 8, 8);
+  if (!isValidDate(result)) throw new Error("date");
+  return result;
+}
+
+function optionalCode(value) {
+  const text = String(value || "");
+  return text ? digits(text, 1, 30) : "";
+}
 
 export function canonicalJson(value) {
   if (value === null) return "null";
