@@ -65,6 +65,8 @@ BUILDING_HUB_API_KEY = "..."
 ARCH_PMS_HUB_API_KEY = "..."
 VWORLD_API_KEY = "..."
 VWORLD_DOMAIN = "won-top-finder-work.streamlit.app"
+
+# 같은 키로 VWorld의 개별주택가격·공동주택가격 속성 API도 조회합니다.
 ```
 
 키를 저장소, 로그, 오류 메시지 또는 화면에 출력하지 마세요.

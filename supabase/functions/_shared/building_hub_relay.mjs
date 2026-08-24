@@ -25,6 +25,7 @@ const MAX_BODY_BYTES = 8192;
 const MAX_RESPONSE_BYTES = 1_000_000;
 const MAX_CLOCK_SKEW_SECONDS = 300;
 const UPSTREAM_TIMEOUT_MS = 12_000;
+const REALTY_PRICE_TIMEOUT_MS = 30_000;
 const HMAC_DERIVATION_PREFIX = "buildinghub-relay-v1\u0000";
 const encoder = new TextEncoder();
 
@@ -211,10 +212,11 @@ async function relayRealtyPrice(request, env, encodedEndpoint) {
         Referer: endpoint === "individual"
           ? `${REALTY_PRICE_ORIGIN}/notice/hpindividual/search.htm`
           : `${REALTY_PRICE_ORIGIN}/notice/town/searchPastYear.htm`,
+        "User-Agent": "Mozilla/5.0 (compatible; WonTopRealtyPrice/1.0)",
         "X-Requested-With": "XMLHttpRequest",
       },
       redirect: "manual",
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      signal: AbortSignal.timeout(REALTY_PRICE_TIMEOUT_MS),
     });
   } catch (error) {
     console.error(JSON.stringify({

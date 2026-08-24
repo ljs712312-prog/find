@@ -209,13 +209,19 @@ def _individual_prices_cached(
     plat_gb_cd: str,
     bun: str,
     ji: str,
+    vworld_key_fingerprint: str,
+    vworld_domain: str | None,
+    _vworld_api_key: str | None,
     _relay_url: str | None,
     _relay_hmac_secret: str | None,
 ) -> tuple[IndividualHousingPrice, ...]:
+    del vworld_key_fingerprint
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
     return RealtyPriceClient(
         relay_url=_relay_url,
         relay_hmac_secret=_relay_hmac_secret,
+        vworld_api_key=_vworld_api_key,
+        vworld_domain=vworld_domain,
     ).get_individual_prices(land_key)
 
 
@@ -229,13 +235,19 @@ def _collective_prices_cached(
     building_name: str,
     dong_name: str,
     ho_name: str,
+    vworld_key_fingerprint: str,
+    vworld_domain: str | None,
+    _vworld_api_key: str | None,
     _relay_url: str | None,
     _relay_hmac_secret: str | None,
 ) -> CollectivePriceResult:
+    del vworld_key_fingerprint
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
     return RealtyPriceClient(
         relay_url=_relay_url,
         relay_hmac_secret=_relay_hmac_secret,
+        vworld_api_key=_vworld_api_key,
+        vworld_domain=vworld_domain,
     ).get_collective_prices(
         land_key,
         building_name=building_name,
@@ -1104,6 +1116,9 @@ def _render_realty_price(
     if not isinstance(current, dict) or current.get("identity") != identity:
         current = {"identity": identity}
     relay_url, relay_hmac_secret = _realty_price_relay_config()
+    vworld_key = _secret("VWORLD_API_KEY")
+    vworld_domain = _secret("VWORLD_DOMAIN")
+    vworld_key_fingerprint = _key_fingerprint(vworld_key) if vworld_key else ""
 
     st.markdown("### 부동산 공시가격 조회")
     st.caption(f"조회 지번은 자동 입력됩니다: {parsed.canonical_address}")
@@ -1114,6 +1129,9 @@ def _render_realty_price(
             current,
             relay_url=relay_url,
             relay_hmac_secret=relay_hmac_secret,
+            vworld_api_key=vworld_key,
+            vworld_domain=vworld_domain,
+            vworld_key_fingerprint=vworld_key_fingerprint,
         )
     if collective_buildings:
         _render_collective_price(
@@ -1122,6 +1140,9 @@ def _render_realty_price(
             current,
             relay_url=relay_url,
             relay_hmac_secret=relay_hmac_secret,
+            vworld_api_key=vworld_key,
+            vworld_domain=vworld_domain,
+            vworld_key_fingerprint=vworld_key_fingerprint,
         )
     if not individual_buildings and not collective_buildings:
         st.info(
@@ -1134,9 +1155,16 @@ def _render_realty_price(
             if not building_list:
                 st.link_button("공시가격알리미 열기", REALTY_PRICE_HOME_URL)
 
-    st.caption(
-        "부동산공시가격알리미 공개 조회 결과이며 실거래가·시세 또는 증명서가 아닙니다."
-    )
+    if vworld_key:
+        st.caption(
+            "국토교통부 VWorld 공시가격 속성 API 조회 결과이며 "
+            "실거래가·시세 또는 증명서가 아닙니다."
+        )
+    else:
+        st.caption(
+            "부동산공시가격알리미 공개 조회 결과이며 "
+            "실거래가·시세 또는 증명서가 아닙니다."
+        )
 
 
 def _price_purpose_text(building: Any) -> str:
@@ -1228,6 +1256,9 @@ def _render_individual_price(
     *,
     relay_url: str | None,
     relay_hmac_secret: str | None,
+    vworld_api_key: str | None,
+    vworld_domain: str | None,
+    vworld_key_fingerprint: str,
 ) -> None:
     st.markdown("#### 다가구·단독주택 개별주택가격")
     st.caption("지번 전체에 공시된 하나의 개별주택가격을 조회합니다.")
@@ -1244,6 +1275,9 @@ def _render_individual_price(
             with st.spinner("주소가 입력된 개별주택 공시가격을 조회하고 있습니다…"):
                 current["individual"] = _individual_prices_cached(
                     *_land_args(parsed.land_key),
+                    vworld_key_fingerprint,
+                    vworld_domain,
+                    vworld_api_key,
                     relay_url,
                     relay_hmac_secret,
                 )
@@ -1295,6 +1329,9 @@ def _render_collective_price(
     *,
     relay_url: str | None,
     relay_hmac_secret: str | None,
+    vworld_api_key: str | None,
+    vworld_domain: str | None,
+    vworld_key_fingerprint: str,
 ) -> None:
     st.markdown("#### 다세대·공동주택 호실별 가격")
     st.caption("건축물대장의 동·호를 자동 입력해 선택한 호실의 공동주택가격을 조회합니다.")
@@ -1333,6 +1370,9 @@ def _render_collective_price(
                 current["collective"] = _collective_prices_cached(
                     *_land_args(parsed.land_key),
                     *selection,
+                    vworld_key_fingerprint,
+                    vworld_domain,
+                    vworld_api_key,
                     relay_url,
                     relay_hmac_secret,
                 )

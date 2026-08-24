@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from src.vworld import land_key_to_pnu
+
 
 REALTY_PRICE_HOME_URL = "https://www.realtyprice.kr/notice/main/main.do"
 COLLECTIVE_HOUSING_PRICE_URL = (
@@ -36,6 +38,12 @@ _INDIVIDUAL_SEARCH_URL = f"{_ORIGIN}/notice/search/hpiSearchListApi.search"
 _COLLECTIVE_OPTION_URL = f"{_ORIGIN}/notice/search/searchApt.search"
 _COLLECTIVE_PRICE_URL = (
     f"{_ORIGIN}/notice/search/townPriceListPastYearMap.search"
+)
+_VWORLD_INDIVIDUAL_PRICE_URL = (
+    "https://api.vworld.kr/ned/data/getIndvdHousingPriceAttr"
+)
+_VWORLD_COLLECTIVE_PRICE_URL = (
+    "https://api.vworld.kr/ned/data/getApartHousingPriceAttr"
 )
 _RELAY_ENDPOINTS = {
     _INDIVIDUAL_SEARCH_URL: "individual",
@@ -182,15 +190,211 @@ class RealtyPriceClient:
         current_year: int | None = None,
         relay_url: str | None = None,
         relay_hmac_secret: str | None = None,
+        vworld_api_key: str | None = None,
+        vworld_domain: str | None = None,
     ) -> None:
         self._session = session or requests.Session()
         self._timeout = timeout
         self._year = current_year or date.today().year
         self._relay_url = self._validate_relay_url(relay_url)
         self._relay_hmac_secret = relay_hmac_secret
+        self._vworld_api_key = str(vworld_api_key or "").strip() or None
+        self._vworld_domain = str(vworld_domain or "").strip() or None
         if bool(self._relay_url) != bool(self._relay_hmac_secret):
             raise ValueError("공시가격 중계 URL과 서명 키는 함께 설정해야 합니다.")
         self._direct_unavailable = False
+
+    def _vworld_items(
+        self,
+        url: str,
+        root_name: str,
+        params: Mapping[str, str],
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Read one documented VWorld housing-price attribute endpoint."""
+
+        if not self._vworld_api_key:
+            raise RealtyPriceError("VWorld 공시가격 API 키가 설정되지 않았습니다.")
+        query = {
+            **params,
+            "format": "json",
+            "numOfRows": "1000",
+            "pageNo": "1",
+            "key": self._vworld_api_key,
+        }
+        if self._vworld_domain:
+            query["domain"] = self._vworld_domain
+        try:
+            response = self._session.get(url, params=query, timeout=self._timeout)
+        except requests.RequestException as exc:
+            raise RealtyPriceError("VWorld 공시가격 API에 연결하지 못했습니다.") from exc
+        if response.status_code != 200:
+            raise RealtyPriceError(
+                f"VWorld 공시가격 API가 HTTP {response.status_code}로 응답했습니다."
+            )
+        try:
+            payload = response.json()
+        except (ValueError, requests.JSONDecodeError) as exc:
+            raise RealtyPriceError("VWorld 공시가격 응답을 해석할 수 없습니다.") from exc
+        if not isinstance(payload, Mapping):
+            raise RealtyPriceError("VWorld 공시가격 응답 형식이 올바르지 않습니다.")
+        result = payload.get(root_name)
+        if not isinstance(result, Mapping):
+            raise RealtyPriceError("VWorld 공시가격 응답에 결과 모델이 없습니다.")
+
+        result_code = str(result.get("resultCode") or "").strip().upper()
+        if result_code and result_code not in {"OK", "SUCCESS", "00"}:
+            if result_code in {"INVALID_KEY", "INCORRECT_KEY", "UNAVAILABLE_KEY"}:
+                raise RealtyPriceError(
+                    "VWorld 인증키 또는 등록 도메인을 확인해 주세요."
+                )
+            message = str(result.get("resultMsg") or result_code).strip()
+            raise RealtyPriceError(f"VWorld 공시가격 조회 실패: {message}")
+
+        items: Any = None
+        for field_name in ("field", "fields", "item", "items"):
+            if field_name in result:
+                items = result[field_name]
+                break
+        if items is None:
+            total_count = str(result.get("totalCount") or "0").strip()
+            if total_count in {"", "0"}:
+                return ()
+            raise RealtyPriceError("VWorld 공시가격 목록 형식이 올바르지 않습니다.")
+        if isinstance(items, Mapping):
+            items = (items,)
+        if not isinstance(items, (list, tuple)) or any(
+            not isinstance(item, Mapping) for item in items
+        ):
+            raise RealtyPriceError("VWorld 공시가격 목록 형식이 올바르지 않습니다.")
+        return tuple(items)
+
+    @staticmethod
+    def _vworld_base_date(item: Mapping[str, Any]) -> str:
+        year = str(item.get("stdrYear") or "").strip()
+        month = str(item.get("stdrMt") or "").strip().zfill(2)
+        return f"{year}{month}" if year and month.strip("0") else year
+
+    def _get_vworld_individual_prices(
+        self,
+        land_key: Any,
+    ) -> tuple[IndividualHousingPrice, ...]:
+        items = self._vworld_items(
+            _VWORLD_INDIVIDUAL_PRICE_URL,
+            "indvdHousingPrices",
+            {"pnu": land_key_to_pnu(land_key)},
+        )
+        prices = tuple(
+            IndividualHousingPrice(
+                base_date=self._vworld_base_date(item),
+                amount=_amount(item.get("housePc")),
+                address=" ".join(
+                    value
+                    for value in (
+                        str(item.get("ldCodeNm") or "").strip(),
+                        str(item.get("mnnmSlno") or "").strip(),
+                    )
+                    if value
+                ),
+                land_area=_decimal(item.get("ladRegstrAr")),
+                building_area=_decimal(item.get("buldAllTotAr")),
+                calculated_land_area=_decimal(item.get("calcPlotAr")),
+                residential_area=None,
+            )
+            for item in items
+            if str(item.get("housePc") or "").strip()
+        )
+        return tuple(sorted(prices, key=lambda item: item.base_date, reverse=True))
+
+    def _get_vworld_collective_prices(
+        self,
+        land_key: Any,
+        *,
+        building_name: str,
+        dong_name: str,
+        ho_name: str,
+    ) -> CollectivePriceResult:
+        target_dong = _label(dong_name, suffix="동")
+        target_ho = _label(ho_name, suffix="호")
+        if not target_ho:
+            raise RealtyPriceError("공동주택 공시가격 조회에는 호실명이 필요합니다.")
+        params = {
+            "pnu": land_key_to_pnu(land_key),
+            "hoNm": target_ho,
+        }
+        if target_dong:
+            params["dongNm"] = target_dong
+        items = self._vworld_items(
+            _VWORLD_COLLECTIVE_PRICE_URL,
+            "apartHousingPrices",
+            params,
+        )
+
+        exact = tuple(
+            item
+            for item in items
+            if _label(item.get("hoNm"), suffix="호") == target_ho
+            and (
+                not target_dong
+                or _label(item.get("dongNm"), suffix="동") == target_dong
+            )
+        )
+        if not exact:
+            raise RealtyPriceError(
+                "VWorld에서 선택한 동·호의 공동주택 공시가격을 찾지 못했습니다."
+            )
+        target_building = _label(building_name)
+        if target_building:
+            building_matches = tuple(
+                item
+                for item in exact
+                if target_building in _label(item.get("aphusNm"))
+                or _label(item.get("aphusNm")) in target_building
+            )
+            if building_matches:
+                exact = building_matches
+
+        identity = {
+            (
+                str(item.get("aphusCode") or "").strip(),
+                _label(item.get("dongNm"), suffix="동"),
+                _label(item.get("hoNm"), suffix="호"),
+            )
+            for item in exact
+        }
+        if len(identity) > 1:
+            raise RealtyPriceError(
+                "같은 동·호가 여러 공동주택에 있어 자동으로 하나를 선택하지 않았습니다."
+            )
+        prices = tuple(
+            CollectiveHousingPrice(
+                notice_date=self._vworld_base_date(item),
+                amount=_amount(item.get("pblntfPc")),
+                private_area=_decimal(item.get("prvuseAr")),
+                complex_name=str(item.get("aphusNm") or building_name).strip(),
+                dong_name=str(item.get("dongNm") or dong_name).strip(),
+                ho_name=str(item.get("hoNm") or ho_name).strip(),
+                address=" ".join(
+                    value
+                    for value in (
+                        str(item.get("ldCodeNm") or "").strip(),
+                        str(item.get("mnnmSlno") or "").strip(),
+                    )
+                    if value
+                ),
+            )
+            for item in exact
+            if str(item.get("pblntfPc") or "").strip()
+        )
+        prices = tuple(
+            sorted(prices, key=lambda item: item.notice_date, reverse=True)
+        )
+        first = prices[0] if prices else None
+        return CollectivePriceResult(
+            complex_name=first.complex_name if first else building_name,
+            dong_name=first.dong_name if first else dong_name,
+            ho_name=first.ho_name if first else ho_name,
+            prices=prices,
+        )
 
     @staticmethod
     def _validate_relay_url(value: str | None) -> str | None:
@@ -334,6 +538,9 @@ class RealtyPriceClient:
         land_key: Any,
     ) -> tuple[IndividualHousingPrice, ...]:
         """Return individual-house prices for detached/multi-family housing."""
+
+        if self._vworld_api_key:
+            return self._get_vworld_individual_prices(land_key)
 
         self._seed(INDIVIDUAL_HOUSING_PRICE_URL)
         plat = _value(land_key, "plat_gb_cd", "platGbCd")
@@ -508,6 +715,14 @@ class RealtyPriceClient:
         ho_name: str,
     ) -> CollectivePriceResult:
         """Resolve one official unit and return its annual published prices."""
+
+        if self._vworld_api_key:
+            return self._get_vworld_collective_prices(
+                land_key,
+                building_name=building_name,
+                dong_name=dong_name,
+                ho_name=ho_name,
+            )
 
         self._seed(COLLECTIVE_HOUSING_PRICE_URL)
         candidates = self._unit_candidates(

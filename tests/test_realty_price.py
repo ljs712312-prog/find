@@ -99,6 +99,113 @@ def test_individual_house_lookup_prefills_the_exact_parcel() -> None:
     assert kwargs["params"]["san"] == "1"
 
 
+def test_vworld_individual_lookup_uses_exact_pnu_without_web_seed() -> None:
+    session = FakeSession(
+        FakeResponse(
+            {
+                "indvdHousingPrices": {
+                    "resultCode": "OK",
+                    "totalCount": "1",
+                    "field": [
+                        {
+                            "pnu": "4111113400103960030",
+                            "ldCodeNm": "경기도 수원시 장안구 영화동",
+                            "mnnmSlno": "396-30",
+                            "stdrYear": "2026",
+                            "stdrMt": "01",
+                            "housePc": "722000000",
+                            "ladRegstrAr": "218.3",
+                            "buldAllTotAr": "557.87",
+                            "calcPlotAr": "185.64",
+                        }
+                    ],
+                }
+            }
+        )
+    )
+
+    prices = RealtyPriceClient(
+        session=session,
+        vworld_api_key="vworld-key",
+        vworld_domain="won-top-finder-work.streamlit.app",
+    ).get_individual_prices(LAND)
+
+    assert prices[0].amount == 722_000_000
+    assert prices[0].base_date == "202601"
+    assert len(session.calls) == 1
+    url, kwargs = session.calls[0]
+    assert url.endswith("/getIndvdHousingPriceAttr")
+    assert kwargs["params"]["pnu"] == "4111113400103960030"
+    assert kwargs["params"]["domain"] == "won-top-finder-work.streamlit.app"
+
+
+def test_vworld_collective_lookup_prefills_pnu_dong_and_unit() -> None:
+    session = FakeSession(
+        FakeResponse(
+            {
+                "apartHousingPrices": {
+                    "resultCode": "OK",
+                    "totalCount": "1",
+                    "field": [
+                        {
+                            "aphusCode": "20358271",
+                            "aphusNm": "다온하우스",
+                            "dongNm": "동명없음",
+                            "hoNm": "201",
+                            "stdrYear": "2026",
+                            "stdrMt": "01",
+                            "prvuseAr": "22.81",
+                            "pblntfPc": "88000000",
+                            "ldCodeNm": "경기도 수원시 팔달구 우만동",
+                            "mnnmSlno": "585-1",
+                        }
+                    ],
+                }
+            }
+        )
+    )
+
+    result = RealtyPriceClient(
+        session=session,
+        vworld_api_key="vworld-key",
+    ).get_collective_prices(
+        COLLECTIVE_LAND,
+        building_name="다온하우스",
+        dong_name="",
+        ho_name="201호",
+    )
+
+    assert result.ho_name == "201"
+    assert result.prices[0].amount == 88_000_000
+    assert result.prices[0].private_area == Decimal("22.81")
+    url, kwargs = session.calls[0]
+    assert url.endswith("/getApartHousingPriceAttr")
+    assert kwargs["params"]["pnu"] == "4111514000105850001"
+    assert kwargs["params"]["hoNm"] == "201"
+    assert "dongNm" not in kwargs["params"]
+
+
+def test_vworld_auth_error_is_explained_without_falling_back() -> None:
+    session = FakeSession(
+        FakeResponse(
+            {
+                "indvdHousingPrices": {
+                    "resultCode": "INCORRECT_KEY",
+                    "resultMsg": "인증키 정보가 올바르지 않습니다.",
+                }
+            }
+        )
+    )
+
+    with pytest.raises(RealtyPriceError, match="인증키 또는 등록 도메인"):
+        RealtyPriceClient(
+            session=session,
+            vworld_api_key="wrong-key",
+        ).get_individual_prices(LAND)
+
+    assert len(session.calls) == 1
+
+
 def test_collective_lookup_resolves_complex_dong_and_unit_before_price() -> None:
     session = FakeSession(
         FakeResponse({}),
