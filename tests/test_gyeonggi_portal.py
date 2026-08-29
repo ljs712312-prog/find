@@ -43,6 +43,12 @@ class FakeSession:
 
 LAND = LandKey("41117", "10700", "0", "0006", "0011")
 MOUNTAIN = LandKey("41113", "12900", "1", "0001", "0005")
+CSRF_PAGE = """
+<html><head>
+<meta content=" session-token " name="_csrf">
+<meta name="_csrf_header" content="X-CSRF-TOKEN">
+</head></html>
+"""
 
 
 def test_public_page_url_uses_exact_pnu() -> None:
@@ -53,7 +59,7 @@ def test_public_page_url_uses_exact_pnu() -> None:
 
 def test_visible_rows_are_only_a_portal_visibility_signal() -> None:
     session = FakeSession(
-        FakeResponse({}),
+        FakeResponse({}, text=CSRF_PAGE),
         FakeResponse(
             [
                 {"bldNm": "일반건축물", "violBldYn": None},
@@ -71,7 +77,7 @@ def test_visible_rows_are_only_a_portal_visibility_signal() -> None:
 
 
 def test_empty_rows_are_not_converted_to_a_violation_yes() -> None:
-    session = FakeSession(FakeResponse({}), FakeResponse([]))
+    session = FakeSession(FakeResponse({}, text=CSRF_PAGE), FakeResponse([]))
     reference = GyeonggiPortalClient(session=session).get_building_reference(LAND)
 
     assert reference.state is PortalBuildingState.NOT_LISTED
@@ -79,7 +85,7 @@ def test_empty_rows_are_not_converted_to_a_violation_yes() -> None:
 
 
 def test_request_uses_mountain_category_and_timeout() -> None:
-    session = FakeSession(FakeResponse({}), FakeResponse([]))
+    session = FakeSession(FakeResponse({}, text=CSRF_PAGE), FakeResponse([]))
     GyeonggiPortalClient(session=session).get_building_reference(MOUNTAIN)
 
     _, kwargs = session.post_calls[0]
@@ -87,6 +93,7 @@ def test_request_uses_mountain_category_and_timeout() -> None:
     assert kwargs["data"]["lgGbn"] == "2"
     assert kwargs["timeout"] == (3.05, 15.0)
     assert kwargs["headers"]["X-Requested-With"] == "XMLHttpRequest"
+    assert kwargs["headers"]["X-CSRF-TOKEN"] == "session-token"
 
 
 @pytest.mark.parametrize("payload", [{}, "blocked", ValueError("not json")])

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlencode
 
@@ -102,6 +103,34 @@ def _request_fields(land_key: Any) -> dict[str, str]:
     return fields
 
 
+class _CsrfMetaParser(HTMLParser):
+    """Read the portal's per-session CSRF meta tags without extra packages."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.values: dict[str, str] = {}
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag.casefold() != "meta":
+            return
+        values = {key.casefold(): str(value or "") for key, value in attrs}
+        name = values.get("name", "").strip()
+        if name in {"_csrf", "_csrf_header"}:
+            self.values[name] = values.get("content", "").strip()
+
+
+def _csrf_headers(page_text: str) -> dict[str, str]:
+    parser = _CsrfMetaParser()
+    parser.feed(page_text)
+    token = parser.values.get("_csrf", "")
+    header = parser.values.get("_csrf_header", "")
+    return {header: token} if header and token else {}
+
+
 class GyeonggiPortalClient:
     """Timeout-bound, single-parcel client for the portal screening signal."""
 
@@ -128,6 +157,7 @@ class GyeonggiPortalClient:
                 headers={
                     "Referer": source_url,
                     "X-Requested-With": "XMLHttpRequest",
+                    **_csrf_headers(page.text),
                 },
                 timeout=self._timeout,
             )
