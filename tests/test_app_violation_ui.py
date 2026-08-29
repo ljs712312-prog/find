@@ -3,9 +3,8 @@ from types import SimpleNamespace
 
 from streamlit.testing.v1 import AppTest
 
-from app import REALTY_PRICE_LOOKUP_STATE_KEY, SearchOutcome
+from app import SearchOutcome
 from src.address import LandKey, ParsedAddress
-from src.realty_price import IndividualHousingPrice
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -57,7 +56,6 @@ def test_violation_screening_is_opt_in_and_has_official_fallback() -> None:
     assert [button.label for button in app.button] == [
         "정보 확인하기",
         "경기부동산포털 1차 확인",
-        "개별주택 공시가격 조회",
         "이 지번의 인허가 호별면적 조회",
     ]
     links = {item.label: item.url for item in app.get("link_button")}
@@ -65,7 +63,7 @@ def test_violation_screening_is_opt_in_and_has_official_fallback() -> None:
         "code=01&pnu=4111710700100060011"
     )
     assert "CappBizCD=15000000098" in links["정부24 대장 열람"]
-    assert links["개별주택가격 공식 사이트"].endswith(
+    assert links["개별주택가격 조회 사이트"].endswith(
         "/notice/hpindividual/search.htm"
     )
     assert "개별공시지가 조회" not in links
@@ -74,31 +72,7 @@ def test_violation_screening_is_opt_in_and_has_official_fallback() -> None:
     )
     assert "경기부동산포털 기준" in rendered_text
     assert "해당 사항 없음" not in rendered_text
-    assert "조회 지번은 자동 입력" in rendered_text
-
-
-def test_individual_price_result_is_rendered_in_the_app() -> None:
-    outcome = _outcome()
-    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
-    app.session_state["search_outcome"] = outcome
-    app.session_state[REALTY_PRICE_LOOKUP_STATE_KEY] = {
-        "identity": ("41117", "10700", "0", "0006", "0011"),
-        "individual": (
-            IndividualHousingPrice(
-                base_date="2026/01/01",
-                amount=722_000_000,
-                address="경기도 수원시 영통구 망포동 6-11",
-                land_area=None,
-                building_area=None,
-                calculated_land_area=None,
-                residential_area=None,
-            ),
-        ),
-    }
-    app.run()
-
-    assert not app.exception
-    assert any(metric.value == "722,000,000원" for metric in app.metric)
+    assert "공식 사이트에서 주소" in rendered_text
 
 
 def test_collective_building_opens_the_unit_price_search() -> None:
@@ -140,11 +114,11 @@ def test_collective_building_opens_the_unit_price_search() -> None:
     app.run()
 
     assert not app.exception
-    assert "선택 호실 공동주택 공시가격 조회" in [
+    assert "선택 호실 공동주택 공시가격 조회" not in [
         button.label for button in app.button
     ]
     links = {item.label: item.url for item in app.get("link_button")}
-    assert links["공동주택가격 공식 사이트"].endswith(
+    assert links["공동주택가격 조회 사이트"].endswith(
         "/notice/town/searchPastYear.htm"
     )
     assert "개별공시가격 조회" not in links
