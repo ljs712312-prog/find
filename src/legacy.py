@@ -44,7 +44,7 @@ def lookup_legacy(
     master: pd.DataFrame,
     floors: pd.DataFrame,
 ) -> tuple[LegacyBuilding, ...]:
-    if master.empty:
+    if not parsed.is_suwon or master.empty:
         return ()
     required = {"대지위치", "번", "지", "관리건축물대장PK"}
     if not required.issubset(master.columns):
