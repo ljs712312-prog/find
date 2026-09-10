@@ -396,4 +396,4 @@ def test_new_search_clears_permit_session_state() -> None:
 
     assert not app.exception
     assert PERMIT_LOOKUP_STATE_KEY not in app.session_state
-    assert any("지번 주소를 입력해 주세요" in item.value for item in app.error)
+    assert any("지번 또는 도로명 주소를 입력해 주세요" in item.value for item in app.error)
