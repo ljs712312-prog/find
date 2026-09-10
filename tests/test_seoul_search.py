@@ -98,6 +98,14 @@ def test_quota_stops_scheduling_and_leaves_unvisited_dongs_explicit():
     assert "한도" in result.stopped_reason and "secret" not in str(result)
 
 
+def test_time_budget_preserves_successes_and_retry_continues_remaining_dongs():
+    partial = search_seoul_lot(LOT, lambda key: (), max_seconds=0)
+    assert not partial.is_complete and len(partial.checked_dongs) == 4
+    calls = []
+    complete = search_seoul_lot(LOT, lambda key: calls.append(key) or (), previous=partial)
+    assert complete.is_complete and len(calls) == 463
+
+
 def test_titles_keep_multiple_buildings_and_reject_wrong_parcel_or_conflicting_pk():
     row = dict(titles()[0].title)
     assert len(titles(rows=[row, row, dict(row, mgmBldrgstPk="B2")])) == 2

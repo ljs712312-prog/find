@@ -155,7 +155,7 @@ def search_seoul_lot(
     fetch: Callable[[LandKey], tuple[TitleSummary, ...]],
     *, previous: SeoulLotResult | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
-    max_seconds: float = 180,
+    max_seconds: float = 600,
 ) -> SeoulLotResult:
     if previous and previous.lot != lot:
         raise ValueError("Cannot merge results for different lot numbers")
