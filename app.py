@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 import hashlib
 import re
+from threading import Lock, local
 from typing import Any, Iterable, Mapping
 
 import pandas as pd
@@ -229,12 +230,22 @@ def _run_citywide_search(lot: LotNumber, previous: SeoulLotResult | None = None)
     relay_url = _secret("BUILDING_HUB_RELAY_URL") or DEFAULT_BUILDING_HUB_RELAY_URL
     relay_secret = _secret("BUILDING_HUB_RELAY_HMAC_SECRET")
     cache = _seoul_title_cache(_key_fingerprint(service_key), _relay_fingerprint(relay_url, relay_secret), "titles-v1")
+    thread_clients = local()
+    clients = []
+    clients_lock = Lock()
 
     def fetch(land_key):
         def request():
-            with BuildingHubClient(service_key, relay_url=relay_url, relay_hmac_secret=relay_secret,
-                                   max_retries=1, timeout=(3.05, 10.0), max_pages=100) as client:
-                return lookup_title_summaries(client, land_key)
+            # Reuse each worker's HTTP connection across dongs. Sessions are
+            # never shared between threads and are closed when this scan ends.
+            if not hasattr(thread_clients, "client"):
+                thread_clients.client = BuildingHubClient(
+                    service_key, relay_url=relay_url, relay_hmac_secret=relay_secret,
+                    max_retries=2, timeout=(3.05, 10.0), max_pages=100,
+                )
+                with clients_lock:
+                    clients.append(thread_clients.client)
+            return lookup_title_summaries(thread_clients.client, land_key)
         return cache.get(land_key, request)
 
     bar = st.progress(0, text="서울 전체에서 같은 지번을 찾고 있습니다…")
@@ -244,6 +255,8 @@ def _run_citywide_search(lot: LotNumber, previous: SeoulLotResult | None = None)
     try:
         return search_seoul_lot(lot, fetch, previous=previous, on_progress=progress)
     finally:
+        for client in clients:
+            client.close()
         bar.empty()
 
 

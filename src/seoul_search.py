@@ -15,7 +15,7 @@ from typing import Callable
 
 from src.address import AddressParseError, LandKey, ParsedAddress, SEOUL_LEGAL_DONG_CODES, normalize_address
 from src.building_hub import (
-    BuildingHubAuthError, BuildingHubError, BuildingHubHTTPError,
+    BuildingHubAPIError, BuildingHubAuthError, BuildingHubError, BuildingHubHTTPError, BuildingHubNetworkError,
     BuildingHubQuotaError, BuildingHubRateLimitError, BuildingHubValidationError,
 )
 from src.lookup import LookupDataError, TitleSummary
@@ -147,6 +147,13 @@ def _failure_reason(error: Exception) -> tuple[str, bool]:
         return "건축HUB 연결 설정을 확인해야 합니다.", True
     if isinstance(error, LookupDataError):
         return "응답의 지번·대장 정보가 일치하지 않아 확인하지 못했습니다.", False
+    if isinstance(error, BuildingHubAPIError):
+        code = error.result_code if re.fullmatch(r"[0-9]{1,4}", error.result_code) else "미상"
+        return f"건축HUB가 응답 오류를 반환했습니다. (코드 {code})", False
+    if isinstance(error, BuildingHubHTTPError):
+        return f"건축HUB 연결 오류로 확인하지 못했습니다. (HTTP {error.status_code})", False
+    if isinstance(error, BuildingHubNetworkError):
+        return "건축HUB 연결 또는 응답 시간이 초과되어 확인하지 못했습니다.", False
     return "건축HUB 응답 지연 또는 오류로 확인하지 못했습니다.", False
 
 

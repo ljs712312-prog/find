@@ -177,3 +177,34 @@ def test_partial_empty_ui_does_not_claim_no_buildings(monkeypatch):
     assert any("일부 검색 결과" in item.value for item in app.warning)
     assert not any("건축물대장이 없습니다" in item.value for item in app.info)
     assert any(b.label == "미확인 동 이어서 검색" for b in app.button)
+
+
+def test_citywide_adapter_reuses_worker_connections_and_closes_every_client(monkeypatch):
+    clients = []
+    requests = []
+    lock = Lock()
+    class Client:
+        def __init__(self, *args, **kwargs):
+            self.thread = get_ident()
+            self.closed = False
+            with lock:
+                clients.append(self)
+        def fetch_all(self, endpoint, key):
+            assert get_ident() == self.thread and not self.closed
+            with lock:
+                requests.append(key)
+            return []
+        def close(self):
+            self.closed = True
+    monkeypatch.setattr(app_module, "BuildingHubClient", Client)
+    monkeypatch.setattr(app_module, "_secret", lambda name: "fixture-key" if name == "BUILDING_HUB_API_KEY" else None)
+    monkeypatch.setattr(app_module, "_seoul_title_cache", lambda *args: TitleCache(interval=0))
+    app = AppTest.from_string('''
+import app
+from src.seoul_search import parse_lot_number
+result = app._run_citywide_search(parse_lot_number("332-37"))
+assert result.is_complete
+''', default_timeout=15).run()
+    assert not app.exception
+    assert len(requests) == 467 and 1 <= len(clients) <= 4
+    assert all(client.closed for client in clients)
