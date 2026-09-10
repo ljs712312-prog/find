@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import requests
@@ -61,6 +62,23 @@ def _request_fields(land_key: LandKey) -> dict[str, str]:
         "bonbeon": land_key.bun,
         "bubeon": land_key.ji,
     }
+
+
+def seoul_portal_url(land_key: LandKey) -> str:
+    """Open the portal's own parcel search with the complete address filled in."""
+    fields = _request_fields(land_key)
+    # Match the official homepage's frmAddr fields. page=main starts the search
+    # after the district's legal-dong options load; selectGubun is search type.
+    query = urlencode({
+        'selectGubun': '1',
+        'selectSigungu': fields['sggCd'],
+        'selBjdong': fields['bjdongCd'],
+        'selectJimok': fields['landGbn'],
+        'bobn': fields['bonbeon'],
+        'bubn': fields['bubeon'],
+        'page': 'main',
+    })
+    return f"{SEOUL_PORTAL_URL}?{query}"
 
 
 def _text(row: dict, name: str) -> str:

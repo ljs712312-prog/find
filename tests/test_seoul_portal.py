@@ -1,4 +1,5 @@
 from dataclasses import replace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import requests
@@ -14,6 +15,7 @@ from src.seoul_portal import (
     SeoulPortalState,
     _request_fields,
     parse_reference,
+    seoul_portal_url,
 )
 
 
@@ -64,6 +66,19 @@ def test_mountain_request_uses_pnu_land_category():
     assert _request_fields(replace(LAND, plat_gb_cd="1"))["landGbn"] == "2"
     with pytest.raises(SeoulPortalError):
         _request_fields(parse_address("망포동 6-11").land_key)
+
+
+@pytest.mark.parametrize(("query", "district", "dong", "category", "main", "sub"), [
+    ("역삼동 737", "11680", "10100", "1", "0737", "0000"),
+    ("은평구 신사동 산 12-3", "11380", "10900", "2", "0012", "0003"),
+])
+def test_direct_link_preserves_full_parcel_and_triggers_portal_search(query, district, dong, category, main, sub):
+    url = seoul_portal_url(parse_address(query, region="서울").land_key)
+    assert url.startswith(SEOUL_PORTAL_URL + "?")
+    assert parse_qs(urlsplit(url).query) == {
+        "selectGubun": ["1"], "selectSigungu": [district], "selBjdong": [dong],
+        "selectJimok": [category], "bobn": [main], "bubn": [sub], "page": ["main"],
+    }
 
 
 def test_conflicting_same_register_is_an_error_but_exact_duplicates_are_removed():
@@ -153,3 +168,5 @@ app._render_violation(parse_address("역삼동 737", region="서울"))
     links = {item.label for item in app.get("link_button")}
     assert "세움터 대장 열람" in links
     assert "서울부동산정보광장 직접 보기" in links
+    direct_link = next(item for item in app.get("link_button") if item.label == "서울부동산정보광장 직접 보기")
+    assert direct_link.proto.url == seoul_portal_url(LAND)

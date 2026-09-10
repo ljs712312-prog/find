@@ -44,7 +44,7 @@ from src.permit_lookup import (
 )
 from src.relay_config import DEFAULT_BUILDING_HUB_RELAY_URL
 from src.seoul_portal import (
-    SEOUL_PORTAL_URL,
+    seoul_portal_url,
     SeoulPortalClient,
     SeoulPortalError,
     SeoulPortalReference,
@@ -1049,7 +1049,11 @@ def _render_violation(parsed: ParsedAddress) -> None:
                 gyeonggi_portal_url(parsed.land_key),
             )
         else:
-            st.link_button("서울부동산정보광장 직접 보기", SEOUL_PORTAL_URL)
+            st.link_button(
+                "서울부동산정보광장 직접 보기",
+                seoul_portal_url(parsed.land_key),
+                help="조회한 지번이 입력된 상태로 서울부동산정보광장의 검색 결과를 엽니다.",
+            )
             st.link_button("세움터 대장 열람", EAIS_REGISTER_URL)
         st.link_button("정부24 대장 열람", GOVERNMENT24_REGISTER_URL)
 
