@@ -78,10 +78,14 @@ class SeoulLotResult:
     failures: tuple[ParcelFailure, ...]
     total_dongs: int
     stopped_reason: str | None = None
+    candidate_parcels: tuple[ParsedAddress, ...] | None = None
+    discovery_complete: bool = True
+    discovery_note: str | None = None
+    elapsed_seconds: float = 0.0
 
     @property
     def is_complete(self) -> bool:
-        return len(self.checked_dongs) == self.total_dongs
+        return self.discovery_complete and len(self.checked_dongs) == self.total_dongs
 
     @property
     def building_count(self) -> int:
@@ -163,12 +167,23 @@ def search_seoul_lot(
     *, previous: SeoulLotResult | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     max_seconds: float = 600,
+    candidates: tuple[ParsedAddress, ...] | None = None,
 ) -> SeoulLotResult:
     if previous and previous.lot != lot:
         raise ValueError("Cannot merge results for different lot numbers")
-    parcels = seoul_parcels(lot)
-    checked = set(previous.checked_dongs) if previous else set()
-    matches = {m.parsed.land_key.legal_dong_code: m for m in previous.matches} if previous else {}
+    all_parcels = seoul_parcels(lot)
+    if candidates is not None:
+        valid_keys = {p.land_key for p in all_parcels}
+        if any(p.land_key not in valid_keys for p in candidates):
+            raise ValueError("Candidates must match the requested Seoul lot exactly")
+        keys = {p.land_key for p in candidates}
+        parcels = tuple(p for p in all_parcels if p.land_key in keys)
+    else:
+        parcels = all_parcels
+    codes = {p.land_key.legal_dong_code for p in parcels}
+    checked = set(previous.checked_dongs) & codes if previous else set()
+    matches = {m.parsed.land_key.legal_dong_code: m for m in previous.matches
+               if m.parsed.land_key.legal_dong_code in codes} if previous else {}
     errors = {}
     queue = iter(p for p in parcels if p.land_key.legal_dong_code not in checked)
     stopped = None
@@ -221,4 +236,5 @@ def search_seoul_lot(
         failures=tuple(ParcelFailure(p, errors.get(p.land_key.legal_dong_code, "아직 확인하지 않은 동입니다."))
                        for p in parcels if p.land_key.legal_dong_code not in checked),
         total_dongs=len(parcels), stopped_reason=stopped,
+        candidate_parcels=parcels if candidates is not None else None,
     )

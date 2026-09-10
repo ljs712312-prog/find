@@ -202,7 +202,7 @@ def test_citywide_adapter_reuses_worker_connections_and_closes_every_client(monk
     app = AppTest.from_string('''
 import app
 from src.seoul_search import parse_lot_number
-result = app._run_citywide_search(parse_lot_number("332-37"))
+result = app._run_citywide_search(parse_lot_number("332-37"), full_scan=True)
 assert result.is_complete
 ''', default_timeout=15).run()
     assert not app.exception
