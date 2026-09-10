@@ -34,7 +34,7 @@ from src.gyeonggi_portal import (
     gyeonggi_portal_url,
 )
 from src.legacy import LegacyBuilding, load_legacy_frames, lookup_legacy
-from src.lookup import RegisterSnapshot, TitleSummary, UnitSummary, lookup_register
+from src.lookup import RegisterSnapshot, TitleSummary, UnitSummary, lookup_register, lookup_title_summaries
 from src.permit_lookup import (
     PermitAreaCategory,
     PermitCaseReference,
@@ -50,6 +50,7 @@ from src.seoul_portal import (
     SeoulPortalReference,
     SeoulPortalState,
 )
+from src.seoul_search import LotNumber, SeoulLotResult, TitleCache, parse_lot_number, search_seoul_lot
 from src.realty_price import (
     COLLECTIVE_HOUSING_PRICE_URL,
     INDIVIDUAL_HOUSING_PRICE_URL,
@@ -77,6 +78,7 @@ PUBLIC_DATA_REQUEST_URL = (
 )
 VIOLATION_LOOKUP_STATE_KEY = "violation_lookup"
 PERMIT_LOOKUP_STATE_KEY = "permit_lookup"
+SEOUL_LOT_STATE_KEY = "seoul_lot_result"
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +214,92 @@ def _land_args(land_key: LandKey) -> tuple[str, str, str, str, str]:
         land_key.bun,
         land_key.ji,
     )
+
+
+@st.cache_resource(max_entries=8)
+def _seoul_title_cache(key_fingerprint: str, relay_fingerprint: str, schema: str) -> TitleCache:
+    return TitleCache()
+
+
+def _run_citywide_search(lot: LotNumber, previous: SeoulLotResult | None = None) -> SeoulLotResult | None:
+    service_key = _secret("BUILDING_HUB_API_KEY")
+    if not service_key:
+        st.error("배포 설정에 건축HUB API 키가 없어 서울 전체 검색을 시작할 수 없습니다.")
+        return previous
+    relay_url = _secret("BUILDING_HUB_RELAY_URL") or DEFAULT_BUILDING_HUB_RELAY_URL
+    relay_secret = _secret("BUILDING_HUB_RELAY_HMAC_SECRET")
+    cache = _seoul_title_cache(_key_fingerprint(service_key), _relay_fingerprint(relay_url, relay_secret), "titles-v1")
+
+    def fetch(land_key):
+        def request():
+            with BuildingHubClient(service_key, relay_url=relay_url, relay_hmac_secret=relay_secret,
+                                   max_retries=1, timeout=(3.05, 10.0), max_pages=100) as client:
+                return lookup_title_summaries(client, land_key)
+        return cache.get(land_key, request)
+
+    bar = st.progress(0, text="서울 전체에서 같은 지번을 찾고 있습니다…")
+    def progress(done, total, buildings):
+        if done % 5 == 0 or done == total:
+            bar.progress(done / total, text=f"서울 법정동 {done}/{total} 확인 중 · 건축물 {buildings}건 발견")
+    try:
+        return search_seoul_lot(lot, fetch, previous=previous, on_progress=progress)
+    finally:
+        bar.empty()
+
+
+def _render_citywide_results(result: SeoulLotResult) -> None:
+    st.subheader(f"서울 전체 · {result.lot.label}번지 검색 결과")
+    coverage = f"법정동 {len(result.checked_dongs)}/{result.total_dongs}곳 확인"
+    found = f"주소 {len(result.matches)}곳 · 건축물 {result.building_count}건"
+    if result.is_complete:
+        st.success(f"{coverage} 완료 · {found}")
+    else:
+        st.warning(f"일부 검색 결과입니다. {coverage} · {found}. 미확인 동 {len(result.failures)}곳이 남아 있습니다.")
+        if result.stopped_reason:
+            st.info(result.stopped_reason)
+        if st.button("미확인 동 이어서 검색", key="seoul_retry"):
+            _clear_search_results(keep_citywide=True)
+            updated = _run_citywide_search(result.lot, previous=result)
+            if updated is not None:
+                st.session_state[SEOUL_LOT_STATE_KEY] = updated
+                st.rerun()
+        with st.expander("미확인 동 보기"):
+            st.dataframe(pd.DataFrame([{"구": f.parsed.district, "법정동": f.parsed.legal_dong, "상태": f.reason}
+                                       for f in result.failures]), hide_index=True, width="stretch")
+    st.caption("본번·부번과 산 여부가 정확히 같은 지번입니다. 건축HUB 표제부 기준이며, 상세 정보는 주소를 선택해 확인하세요.")
+    if not result.matches:
+        if result.is_complete:
+            st.info("서울 전체에서 해당 지번으로 조회되는 건축물대장이 없습니다.")
+        else:
+            st.info("확인된 동에서는 아직 건축물을 찾지 못했습니다. 미확인 동을 이어서 검색해 주세요.")
+        return
+
+    district = st.selectbox("결과 구 필터", ["서울 전체", *sorted({m.parsed.district for m in result.matches})], key="seoul_district_filter")
+    matches = [m for m in result.matches if district == "서울 전체" or m.parsed.district == district]
+    rows = []
+    for match in matches:
+        for building in match.buildings:
+            parking = next(value for label, value, _ in _metric_cards(building) if label == "주차")
+            rows.append({
+                "주소": match.parsed.canonical_address,
+                "건물명": building.building_name or "-", "건물 동": building.dong_name or "-",
+                "주용도": building.purpose_name or "-", "상세용도": building.other_purpose or "-",
+                "연면적(㎡)": _decimal_text(building.total_area, suffix=""), "주차대수": parking,
+            })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    selected = st.selectbox("상세 조회할 주소", [m.parsed.canonical_address for m in matches],
+                            index=None, placeholder="주소를 선택하세요", key="seoul_address_choice")
+    outcome = st.session_state.get("search_outcome")
+    if outcome is not None and outcome.parsed.canonical_address != selected:
+        _clear_search_results(keep_citywide=True)
+    if st.button("선택한 주소 상세 조회", disabled=selected is None):
+        _clear_search_results(keep_citywide=True)
+        with st.spinner("선택한 건물의 층별·호실별 상세 정보를 확인하고 있습니다…"):
+            st.session_state.search_outcome = _search(
+                selected, _secret("BUILDING_HUB_API_KEY"), region="서울",
+                relay_url=_secret("BUILDING_HUB_RELAY_URL") or DEFAULT_BUILDING_HUB_RELAY_URL,
+                relay_hmac_secret=_secret("BUILDING_HUB_RELAY_HMAC_SECRET"),
+            )
 
 
 def _friendly_api_error(error: BuildingHubError) -> str:
@@ -1403,10 +1491,11 @@ def _render_legacy(outcome: SearchOutcome) -> None:
 def _render_intro(region: str = "서울") -> None:
     if region == "서울":
         st.info(
-            "서울 25개 구의 법정동과 지번을 입력하세요. "
-            "예: `역삼동 737`, `금천구 독산동 1000`, `종로구 청운동 산1-1`.  "
-            "신사동·신정동처럼 이름이 같은 동은 구까지 입력해 주세요."
+            "동을 몰라도 `332-37`, `737`, `산1-5`처럼 지번만 입력하면 서울 전체에서 찾습니다. "
+            "동을 알면 `역삼동 737`, `금천구 독산동 332-37`처럼 바로 조회할 수 있습니다. "
+            "같은 이름의 동은 구까지 입력해 주세요."
         )
+        st.caption("서울 전체 검색은 처음에 약 2~3분 걸릴 수 있습니다. 같은 지번의 확인 결과는 24시간 재사용합니다. 737은 부번 없는 737번지, 산737은 산번지만 찾습니다.")
     else:
         st.info(
             "수원시 법정동 지번을 입력하세요. 산번지는 ‘산’을 포함해야 합니다.  "
@@ -1418,9 +1507,12 @@ def _render_intro(region: str = "서울") -> None:
     )
 
 
-def _clear_search_results() -> None:
+def _clear_search_results(*, keep_citywide: bool = False) -> None:
     for key in ("search_outcome", VIOLATION_LOOKUP_STATE_KEY, PERMIT_LOOKUP_STATE_KEY):
         st.session_state.pop(key, None)
+    if not keep_citywide:
+        for key in (SEOUL_LOT_STATE_KEY, "seoul_district_filter", "seoul_address_choice"):
+            st.session_state.pop(key, None)
 
 
 def _set_korean_document_language() -> None:
@@ -1485,10 +1577,10 @@ def render_app() -> None:
         query = st.text_input(
             "지번 주소",
             placeholder=(
-                "예: 역삼동 737 / 은평구 신사동 1-1"
+                "예: 332-37 / 737 / 역삼동 737"
                 if region == "서울" else "예: 망포동 6-11 / 오목천동 산1-5"
             ),
-            help="선택한 지역의 법정동과 지번을 입력하세요. 같은 동명이 여러 구에 있으면 구도 입력하세요.",
+            help="지번만 입력하면 서울 전체를 검색합니다. 본번만 입력하면 부번 없는 지번을 찾고, 산번지는 산을 붙여 주세요. 동과 지번을 함께 입력하면 바로 상세 조회합니다.",
         )
         submitted = st.form_submit_button("정보 확인하기", width="stretch")
 
@@ -1500,31 +1592,39 @@ def render_app() -> None:
             st.error("지번 주소를 입력해 주세요.")
         else:
             try:
-                with st.spinner("건축HUB 건축물 정보를 확인하고 있습니다…"):
-                    building_key = _secret("BUILDING_HUB_API_KEY")
-                    relay_url = (
-                        _secret("BUILDING_HUB_RELAY_URL")
-                        or DEFAULT_BUILDING_HUB_RELAY_URL
-                    )
-                    relay_hmac_secret = _secret("BUILDING_HUB_RELAY_HMAC_SECRET")
-                    st.session_state.search_outcome = _search(
-                        query,
-                        building_key,
-                        region=region,
-                        relay_url=relay_url,
-                        relay_hmac_secret=relay_hmac_secret,
-                    )
+                lot = parse_lot_number(query)
+                if lot is not None:
+                    st.session_state[SEOUL_LOT_STATE_KEY] = _run_citywide_search(lot)
+                else:
+                    with st.spinner("건축HUB 건축물 정보를 확인하고 있습니다…"):
+                        building_key = _secret("BUILDING_HUB_API_KEY")
+                        relay_url = (
+                            _secret("BUILDING_HUB_RELAY_URL")
+                            or DEFAULT_BUILDING_HUB_RELAY_URL
+                        )
+                        relay_hmac_secret = _secret("BUILDING_HUB_RELAY_HMAC_SECRET")
+                        st.session_state.search_outcome = _search(
+                            query,
+                            building_key,
+                            region=region,
+                            relay_url=relay_url,
+                            relay_hmac_secret=relay_hmac_secret,
+                        )
             except AddressParseError as error:
                 st.error(str(error))
 
+    citywide = st.session_state.get(SEOUL_LOT_STATE_KEY)
+    if citywide is not None:
+        _render_citywide_results(citywide)
+
     outcome = st.session_state.get("search_outcome")
-    if outcome is None:
+    if outcome is None and citywide is None:
         _render_intro(region)
-    elif outcome.snapshot is not None:
+    elif outcome is not None and outcome.snapshot is not None:
         _render_api(outcome)
-    elif outcome.legacy:
+    elif outcome is not None and outcome.legacy:
         _render_legacy(outcome)
-    else:
+    elif outcome is not None:
         st.error(
             f"{outcome.api_error or '조회에 실패했습니다.'} "
             + ("보조 스냅샷에도 해당 지번이 없습니다." if outcome.parsed.is_suwon

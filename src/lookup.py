@@ -610,6 +610,22 @@ def _make_title(title_pk: str, rows: Sequence[Mapping[str, Any]]) -> TitleSummar
     )
 
 
+def lookup_title_summaries(client: _FetchAllClient, land_key: LandKey) -> tuple[TitleSummary, ...]:
+    """Fetch only titles for city-wide discovery, failing closed on bad rows."""
+    rows, stats = _validate_and_dedupe(
+        TITLE_ENDPOINT, client.fetch_all(TITLE_ENDPOINT, land_key), land_key,
+    )
+    if stats.rejected_count:
+        raise LookupDataError("표제부 응답에 다른 지번 또는 주소가 누락된 행이 있습니다.")
+    by_pk = {}
+    for row in rows:
+        pk = _text(row, "mgmBldrgstPk")
+        if not pk or pk in by_pk:
+            raise LookupDataError("표제부 관리번호가 누락되거나 같은 대장의 내용이 서로 다릅니다.")
+        by_pk[pk] = _make_title(pk, [row])
+    return tuple(by_pk.values())
+
+
 def _make_recap(row: Mapping[str, Any]) -> RecapSummary:
     return RecapSummary(
         recap_pk=_text(row, "mgmBldrgstPk"),
