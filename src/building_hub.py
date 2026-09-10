@@ -439,6 +439,14 @@ class BuildingHubClient:
                     self._backoff(attempt, self._retry_after(response))
                     continue
                 raise
+            except BuildingHubAPIError as error:
+                # The gateway also reports upstream timeouts as HTTP 200 with
+                # resultCode=05. Retry that documented transient condition;
+                # credentials, quota and invalid parameters remain failures.
+                if error.retryable and attempt < self._max_retries:
+                    self._backoff(attempt, self._retry_after(response))
+                    continue
+                raise
             except (BuildingHubDecodeError, BuildingHubEnvelopeError):
                 # The public gateway occasionally terminates a successful HTTP
                 # response early or returns a transient HTML/empty body. A
@@ -780,7 +788,7 @@ class BuildingHubClient:
             raise BuildingHubQuotaError(code, message, retryable=False)
         if code in self._RATE_LIMIT_CODES:
             raise BuildingHubRateLimitError(code, message, retryable=True)
-        raise BuildingHubAPIError(code, message, retryable=False)
+        raise BuildingHubAPIError(code, message, retryable=code == "05")
 
     @staticmethod
     def _normalize_items(raw_items: Any) -> list[dict[str, Any]]:

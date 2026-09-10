@@ -437,6 +437,24 @@ def test_network_failure_retries_then_succeeds() -> None:
     assert sleeps == [0.5]
 
 
+def test_http_200_gateway_service_timeout_retries_then_succeeds() -> None:
+    response = FakeResponse(payload=api_payload(None, code="05", message="SERVICETIMEOUT_ERROR"))
+    session = FakeSession(response, FakeResponse(payload=api_payload({"id": "ok"})))
+    sleeps = []
+    client = BuildingHubClient(KEY, session=session, max_retries=2, sleep=sleeps.append)
+    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [{"id": "ok"}]
+    assert len(session.calls) == 2 and sleeps == [0.25]
+
+
+def test_persistent_gateway_timeout_stops_at_configured_attempt_count() -> None:
+    response = FakeResponse(payload=api_payload(None, code="05", message="SERVICETIMEOUT_ERROR"))
+    session = FakeSession(response, response, response)
+    client = BuildingHubClient(KEY, session=session, max_retries=2, sleep=lambda _: None)
+    with pytest.raises(BuildingHubAPIError) as error:
+        client.fetch_all("getBrTitleInfo", LAND_DICT)
+    assert error.value.result_code == "05" and len(session.calls) == 3
+
+
 def test_network_failure_after_retries_is_sanitized() -> None:
     session = FakeSession(requests.Timeout(f"timed out with {KEY}"))
     client = BuildingHubClient(KEY, session=session, max_retries=0)
