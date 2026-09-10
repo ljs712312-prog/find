@@ -1,4 +1,4 @@
-"""Safe parsing of Seoul and Suwon lot addresses for the BuildingHUB API.
+"""Safe parsing of Suwon lot-number addresses for the BuildingHUB API.
 
 The legal-dong codes below are the current, non-abolished Suwon entries from
 the Korean Standard Code Management System (행정표준코드관리시스템).  A
@@ -9,8 +9,6 @@ five digits (``sigunguCd``) and the last five digits (``bjdongCd``).
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-from pathlib import Path
 import re
 import unicodedata
 from typing import Final
@@ -87,20 +85,6 @@ SUWON_DISTRICTS: Final[dict[str, str]] = {
     "41117": "영통구",
 }
 
-# Names are scoped by district: e.g. Seoul has two different 신사동 entries.
-_SEOUL_DATA = json.loads(
-    (Path(__file__).resolve().parents[1] / "data" / "seoul_legal_dongs.json")
-    .read_text(encoding="utf-8")
-)
-SEOUL_LEGAL_DONG_CODES: Final[dict[tuple[str, str], str]] = {
-    (row["district"], row["name"]): row["code"]
-    for row in _SEOUL_DATA["legal_dongs"]
-}
-SEOUL_DISTRICTS: Final[dict[str, str]] = {
-    code[:5]: district for (district, _), code in SEOUL_LEGAL_DONG_CODES.items()
-}
-DISTRICTS: Final[dict[str, str]] = {**SEOUL_DISTRICTS, **SUWON_DISTRICTS}
-
 _DASH_TRANSLATION: Final[dict[int, str]] = str.maketrans(
     {
         "‐": "-",  # hyphen
@@ -126,7 +110,7 @@ _LOT_ADDRESS_PATTERN: Final[re.Pattern[str]] = re.compile(
 
 
 class AddressParseError(ValueError):
-    """Raised when an input is not an unambiguous supported lot address."""
+    """Raised when an input is not an unambiguous Suwon lot address."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +155,7 @@ class LandKey:
 
 @dataclass(frozen=True, slots=True)
 class ParsedAddress:
-    """Normalized, resolved representation of a supported lot address."""
+    """Normalized, resolved representation of a Suwon lot address."""
 
     raw: str
     normalized: str
@@ -192,17 +176,9 @@ class ParsedAddress:
         return f"{prefix}{main_number}{suffix}"
 
     @property
-    def is_suwon(self) -> bool:
-        return self.land_key.sigungu_cd in SUWON_DISTRICTS
-
-    @property
-    def city_name(self) -> str:
-        return "경기도 수원시" if self.is_suwon else "서울특별시"
-
-    @property
     def canonical_address(self) -> str:
         return (
-            f"{self.city_name} {self.district} "
+            f"경기도 수원시 {self.district} "
             f"{self.legal_dong} {self.lot_number}번지"
         )
 
@@ -222,47 +198,33 @@ def normalize_address(value: str) -> str:
     return normalized
 
 
-def _resolve_legal_dong(
-    location: str, region: str | None = None,
-) -> tuple[str, str, str]:
-    """Resolve exact city/district/dong aliases without choosing a duplicate."""
+def _resolve_legal_dong(location: str) -> tuple[str, str, str]:
+    """Resolve an exact supported Suwon location to district and API codes."""
 
-    if region not in {None, "서울", "수원"}:
-        raise AddressParseError("지원 지역은 서울과 수원입니다.")
     legal_dong = location.rsplit(" ", 1)[-1]
-    candidates: list[tuple[str, str, str, tuple[str, ...]]] = []
-    if region in {None, "서울"}:
-        for (district, dong), code in SEOUL_LEGAL_DONG_CODES.items():
-            if dong == legal_dong:
-                candidates.append((district, dong, code, ("서울", "서울시", "서울특별시")))
-    if region in {None, "수원"}:
-        code = SUWON_LEGAL_DONG_CODES.get(legal_dong)
-        if code:
-            candidates.append((SUWON_DISTRICTS[code[:5]], legal_dong, code,
-                               ("수원", "수원시", "경기도 수원시")))
+    full_code = SUWON_LEGAL_DONG_CODES.get(legal_dong)
+    if full_code is None:
+        raise AddressParseError("수원시의 현행 법정동을 확인할 수 없습니다.")
 
-    matches = []
-    for district, dong, code, cities in candidates:
-        accepted = {dong, f"{district} {dong}"}
-        for city in cities:
-            accepted.update({f"{city} {dong}", f"{city} {district} {dong}"})
-        if location in accepted:
-            matches.append((district, dong, code, cities[-1]))
-    if len(matches) > 1:
-        choices = ", ".join(f"{city} {district} {dong}" for district, dong, _, city in matches)
-        raise AddressParseError(f"같은 이름의 법정동이 여러 곳입니다. 구까지 입력해 주세요: {choices}")
-    if not matches:
-        scope = {None: "서울·수원", "서울": "서울특별시", "수원": "수원시"}[region]
-        raise AddressParseError(
-            f"{scope}의 현행 법정동과 구를 확인해 주세요. "
-            "행정동·도로명 대신 법정동과 지번을 입력하고, 조회 지역도 확인해 주세요."
-        )
-    _, dong, code, _ = matches[0]
-    return dong, code[:5], code[5:]
+    sigungu_cd = full_code[:5]
+    bjdong_cd = full_code[5:]
+    district = SUWON_DISTRICTS[sigungu_cd]
+    accepted_locations = {
+        legal_dong,
+        f"{district} {legal_dong}",
+        f"수원시 {legal_dong}",
+        f"수원시 {district} {legal_dong}",
+        f"경기도 수원시 {legal_dong}",
+        f"경기도 수원시 {district} {legal_dong}",
+    }
+    if location not in accepted_locations:
+        raise AddressParseError("수원시 법정동 주소 형식을 확인해 주세요.")
+
+    return legal_dong, sigungu_cd, bjdong_cd
 
 
-def parse_address(value: str, *, region: str | None = None) -> ParsedAddress:
-    """Parse a Seoul/Suwon lot address without guessing its jurisdiction.
+def parse_address(value: str) -> ParsedAddress:
+    """Parse a Suwon lot address without guessing or regex-based searching.
 
     Accepted examples include ``망포동 6-11``, ``오목천동 산 1-5`` and
     ``경기도 수원시 영통구 망포동 6-11번지``.  A query containing only a
@@ -275,7 +237,7 @@ def parse_address(value: str, *, region: str | None = None) -> ParsedAddress:
         raise AddressParseError("동명과 지번을 함께 입력해 주세요.")
 
     location = match.group("location").strip()
-    legal_dong, sigungu_cd, bjdong_cd = _resolve_legal_dong(location, region)
+    legal_dong, sigungu_cd, bjdong_cd = _resolve_legal_dong(location)
 
     bun_number = int(match.group("bun"))
     ji_number = int(match.group("ji") or "0")
@@ -292,7 +254,7 @@ def parse_address(value: str, *, region: str | None = None) -> ParsedAddress:
     return ParsedAddress(
         raw=value,
         normalized=normalized,
-        district=DISTRICTS[sigungu_cd],
+        district=SUWON_DISTRICTS[sigungu_cd],
         legal_dong=legal_dong,
         land_key=land_key,
     )

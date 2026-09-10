@@ -59,7 +59,7 @@ from src.vworld import (
 # Bump this whenever cached API response interpretation changes.  Streamlit
 # hashes this argument into each entry, so a hot deploy cannot keep serving a
 # snapshot produced by an older register-mapping rule.
-LOOKUP_CACHE_SCHEMA = "2026-09-10.1"
+LOOKUP_CACHE_SCHEMA = "2026-08-21.3"
 PERMIT_CACHE_SCHEMA = "2026-08-15.1"
 GOVERNMENT24_REGISTER_URL = (
     "https://www.gov.kr/mw/AA020InfoCappView.do?CappBizCD=15000000098"
@@ -275,11 +275,10 @@ def _search(
     query: str,
     service_key: str | None,
     *,
-    region: str | None = None,
     relay_url: str | None = None,
     relay_hmac_secret: str | None = None,
 ) -> SearchOutcome:
-    parsed = parse_address(query, region=region)
+    parsed = parse_address(query)
     if service_key:
         try:
             cache_args = (
@@ -304,10 +303,8 @@ def _search(
     else:
         api_error = "배포 설정에 건축HUB API 키가 없습니다."
 
-    legacy = ()
-    if parsed.is_suwon:
-        master, floors = _legacy_frames()
-        legacy = lookup_legacy(parsed, master, floors)
+    master, floors = _legacy_frames()
+    legacy = lookup_legacy(parsed, master, floors)
     return SearchOutcome(
         parsed=parsed,
         legacy=legacy,
@@ -964,33 +961,26 @@ def _render_violation(parsed: ParsedAddress) -> None:
         current = {"identity": identity}
 
     st.markdown("### 위반건축물 간편 확인")
-    if parsed.is_suwon:
-        st.caption("버튼을 누르면 경기부동산포털 기준으로 확인합니다.")
-    else:
-        st.caption("위반 여부는 정부24·세움터의 발급 대장에서 확인해 주세요.")
+    st.caption("버튼을 누르면 경기부동산포털 기준으로 확인합니다.")
 
     portal_clicked = False
     vworld_clicked = False
     vworld_key = _secret("VWORLD_API_KEY")
     with st.container(horizontal=True, gap="small"):
-        if parsed.is_suwon:
-            portal_clicked = st.button(
-                "경기부동산포털 1차 확인",
-                key=f"portal-check-{'-'.join(identity)}",
-                help="포털의 건축물 표시 여부만 확인합니다. 위반 여부 확정 기능이 아닙니다.",
-            )
+        portal_clicked = st.button(
+            "경기부동산포털 1차 확인",
+            key=f"portal-check-{'-'.join(identity)}",
+            help="포털의 건축물 표시 여부만 확인합니다. 위반 여부 확정 기능이 아닙니다.",
+        )
         if vworld_key:
             vworld_clicked = st.button(
                 "VWorld 위반표시 참고조회",
                 key=f"vworld-check-{'-'.join(identity)}",
             )
-        if parsed.is_suwon:
-            st.link_button(
-                "경기포털에서 직접 보기",
-                gyeonggi_portal_url(parsed.land_key),
-            )
-        else:
-            st.link_button("세움터 대장 열람", EAIS_REGISTER_URL)
+        st.link_button(
+            "경기포털에서 직접 보기",
+            gyeonggi_portal_url(parsed.land_key),
+        )
         st.link_button("정부24 대장 열람", GOVERNMENT24_REGISTER_URL)
 
     if portal_clicked:
@@ -1320,27 +1310,11 @@ def _render_legacy(outcome: SearchOutcome) -> None:
         _render_legacy_building(building, index)
 
 
-def _render_intro(region: str = "서울") -> None:
-    if region == "서울":
-        st.info(
-            "서울 25개 구의 법정동과 지번을 입력하세요. "
-            "예: `역삼동 737`, `금천구 독산동 1000`, `종로구 청운동 산1-1`.  "
-            "신사동·신정동처럼 이름이 같은 동은 구까지 입력해 주세요."
-        )
-    else:
-        st.info(
-            "수원시 법정동 지번을 입력하세요. 산번지는 ‘산’을 포함해야 합니다.  "
-            "예: `망포동 6-11`, `오목천동 산1-5`, `매산로1가 1-4`"
-        )
-    st.caption(
-        "제1·2종 근린생활시설, 주택, 오피스텔, 업무시설 등 용도에 관계없이 조회합니다. "
-        "용도·면적·주차·층별 정보와 집합건물 호실별 면적은 공개 API 제공 범위에서 표시됩니다."
+def _render_intro() -> None:
+    st.info(
+        "수원시 법정동 지번을 입력하세요. 산번지는 ‘산’을 포함해야 합니다.  "
+        "예: `망포동 6-11`, `오목천동 산1-5`, `매산로1가 1-4`"
     )
-
-
-def _clear_search_results() -> None:
-    for key in ("search_outcome", VIOLATION_LOOKUP_STATE_KEY, PERMIT_LOOKUP_STATE_KEY):
-        st.session_state.pop(key, None)
 
 
 def _set_korean_document_language() -> None:
@@ -1373,7 +1347,7 @@ def _set_korean_document_language() -> None:
 
 def render_app() -> None:
     st.set_page_config(
-        page_title="건축물대장 조회시스템",
+        page_title="원탑 건축물대장",
         page_icon="🏢",
         layout="centered",
     )
@@ -1397,28 +1371,23 @@ def render_app() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.title("🏢 건축물대장 조회시스템")
-    st.caption("국토교통부 건축HUB 공식 API 기반 · 서울·수원 지번 조회")
-    region = st.radio(
-        "조회 지역", ("서울", "수원"), horizontal=True,
-        key="search_region", on_change=_clear_search_results,
-    )
+    st.title("🏢 원탑 건축물대장")
+    st.caption("국토교통부 건축HUB 공식 API 기반 · 수원시 지번 조회")
 
     with st.form("search_form", clear_on_submit=False):
         query = st.text_input(
             "지번 주소",
-            placeholder=(
-                "예: 역삼동 737 / 은평구 신사동 1-1"
-                if region == "서울" else "예: 망포동 6-11 / 오목천동 산1-5"
-            ),
-            help="선택한 지역의 법정동과 지번을 입력하세요. 같은 동명이 여러 구에 있으면 구도 입력하세요.",
+            placeholder="예: 망포동 6-11 / 오목천동 산1-5",
+            help="현재 수원시 법정동 지번을 지원합니다.",
         )
         submitted = st.form_submit_button("정보 확인하기", width="stretch")
 
     if submitted:
         # Clear the previous result before validation/network work so stale data
         # can never remain paired with a new or empty query.
-        _clear_search_results()
+        st.session_state.pop("search_outcome", None)
+        st.session_state.pop(VIOLATION_LOOKUP_STATE_KEY, None)
+        st.session_state.pop(PERMIT_LOOKUP_STATE_KEY, None)
         if not query.strip():
             st.error("지번 주소를 입력해 주세요.")
         else:
@@ -1433,7 +1402,6 @@ def render_app() -> None:
                     st.session_state.search_outcome = _search(
                         query,
                         building_key,
-                        region=region,
                         relay_url=relay_url,
                         relay_hmac_secret=relay_hmac_secret,
                     )
@@ -1442,7 +1410,7 @@ def render_app() -> None:
 
     outcome = st.session_state.get("search_outcome")
     if outcome is None:
-        _render_intro(region)
+        _render_intro()
     elif outcome.snapshot is not None:
         _render_api(outcome)
     elif outcome.legacy:
@@ -1450,8 +1418,7 @@ def render_app() -> None:
     else:
         st.error(
             f"{outcome.api_error or '조회에 실패했습니다.'} "
-            + ("보조 스냅샷에도 해당 지번이 없습니다." if outcome.parsed.is_suwon
-               else "서울 건축물 정보는 API 연결이 복구된 뒤 다시 조회해 주세요.")
+            "보조 스냅샷에도 해당 지번이 없습니다."
         )
         _render_violation(outcome.parsed)
         _render_realty_price(outcome.parsed)
