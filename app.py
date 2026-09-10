@@ -1373,7 +1373,7 @@ def _set_korean_document_language() -> None:
 
 def render_app() -> None:
     st.set_page_config(
-        page_title="원탑 건축물대장",
+        page_title="건축물대장 조회시스템",
         page_icon="🏢",
         layout="centered",
     )
@@ -1397,7 +1397,7 @@ def render_app() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.title("🏢 원탑 건축물대장")
+    st.title("🏢 건축물대장 조회시스템")
     st.caption("국토교통부 건축HUB 공식 API 기반 · 서울·수원 지번 조회")
     region = st.radio(
         "조회 지역", ("서울", "수원"), horizontal=True,
