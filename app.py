@@ -43,6 +43,13 @@ from src.permit_lookup import (
     lookup_permit_households,
 )
 from src.relay_config import DEFAULT_BUILDING_HUB_RELAY_URL
+from src.seoul_portal import (
+    SEOUL_PORTAL_URL,
+    SeoulPortalClient,
+    SeoulPortalError,
+    SeoulPortalReference,
+    SeoulPortalState,
+)
 from src.realty_price import (
     COLLECTIVE_HOUSING_PRICE_URL,
     INDIVIDUAL_HOUSING_PRICE_URL,
@@ -186,6 +193,15 @@ def _gyeonggi_portal_cached(
 ) -> PortalBuildingReference:
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
     return GyeonggiPortalClient().get_building_reference(land_key)
+
+
+@st.cache_data(ttl=10 * 60, max_entries=256, show_spinner=False)
+def _seoul_portal_cached(
+    sigungu_cd: str, bjdong_cd: str, plat_gb_cd: str, bun: str, ji: str,
+) -> SeoulPortalReference:
+    return SeoulPortalClient().get_building_reference(
+        LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
+    )
 
 
 def _land_args(land_key: LandKey) -> tuple[str, str, str, str, str]:
@@ -955,6 +971,39 @@ def _render_portal_reference(reference: PortalBuildingReference) -> None:
     getattr(st, level)(message)
 
 
+def _render_seoul_portal_reference(reference: SeoulPortalReference) -> None:
+    if reference.state is SeoulPortalState.NOT_LISTED:
+        st.warning(
+            "서울포털 건축물정보 미표시 — 추가 확인 필요. "
+            "위반건축물 정보 미제공 정책과 관련될 수 있지만, 자료 누락·관련 지번 등의 "
+            "다른 원인도 있어 이 결과만으로 위반건축물로 확정할 수 없습니다."
+        )
+    elif reference.state is SeoulPortalState.FLAGGED:
+        st.warning(
+            "서울포털 반환 자료에 위반 표시가 있습니다. "
+            "표시된 건물·동을 확인하고 세움터·정부24 발급 대장으로 최종 확인해 주세요."
+        )
+    else:
+        st.info(
+            f"서울포털에서 건축물대장 목록 {len(reference.buildings)}건이 표시됩니다. "
+            "조회된 목록만 확인한 결과이며, 같은 지번의 다른 건물·호실까지 위반이 없다는 뜻은 아닙니다."
+        )
+    if reference.buildings:
+        def flag_text(raw: str) -> str:
+            if raw.upper() in {"1", "Y", "YES", "위반", "위반건축물"}:
+                return "위반 표시 있음 (참고)"
+            if raw.upper() in {"0", "N", "NO"}:
+                return "반환 목록에 위반 표시 없음 (참고)"
+            return "확인 불가"
+
+        st.dataframe(pd.DataFrame([
+            {"건물명": b.name or "-", "동": b.dong or "-", "대장": b.register_kind or "-",
+             "용도": b.purpose or "-", "포털 위반 표시": flag_text(b.violation_raw)}
+            for b in reference.buildings
+        ]), hide_index=True, width="stretch")
+    st.caption(f"출처: 서울부동산정보광장 · 조회시각: {reference.checked_at} (한국시간)")
+
+
 def _render_violation(parsed: ParsedAddress) -> None:
     """Render opt-in screening; never make a certified violation decision."""
 
@@ -967,9 +1016,13 @@ def _render_violation(parsed: ParsedAddress) -> None:
     if parsed.is_suwon:
         st.caption("버튼을 누르면 경기부동산포털 기준으로 확인합니다.")
     else:
-        st.caption("위반 여부는 정부24·세움터의 발급 대장에서 확인해 주세요.")
+        st.caption(
+            "서울부동산정보광장은 2025.09.12부터 위반건축물 정보를 표시하지 않습니다. "
+            "아래 버튼으로 건축물정보 표시 여부를 참고 확인하고, 최종 판단은 발급 대장으로 확인하세요."
+        )
 
     portal_clicked = False
+    seoul_clicked = False
     vworld_clicked = False
     vworld_key = _secret("VWORLD_API_KEY")
     with st.container(horizontal=True, gap="small"):
@@ -978,6 +1031,12 @@ def _render_violation(parsed: ParsedAddress) -> None:
                 "경기부동산포털 1차 확인",
                 key=f"portal-check-{'-'.join(identity)}",
                 help="포털의 건축물 표시 여부만 확인합니다. 위반 여부 확정 기능이 아닙니다.",
+            )
+        else:
+            seoul_clicked = st.button(
+                "서울포털 위반건축물 참고 확인",
+                key=f"seoul-check-{'-'.join(identity)}",
+                help="해당 지번의 건축물정보 표시 여부와 반환된 위반 표시를 확인합니다. 미표시만으로 위반을 확정하지 않습니다.",
             )
         if vworld_key:
             vworld_clicked = st.button(
@@ -990,8 +1049,25 @@ def _render_violation(parsed: ParsedAddress) -> None:
                 gyeonggi_portal_url(parsed.land_key),
             )
         else:
+            st.link_button("서울부동산정보광장 직접 보기", SEOUL_PORTAL_URL)
             st.link_button("세움터 대장 열람", EAIS_REGISTER_URL)
         st.link_button("정부24 대장 열람", GOVERNMENT24_REGISTER_URL)
+
+    if seoul_clicked:
+        current.pop("seoul_error", None)
+        current.pop("seoul", None)
+        try:
+            with st.spinner("서울포털의 건축물정보를 확인하고 있습니다…"):
+                current["seoul"] = _seoul_portal_cached(*identity)
+        except SeoulPortalError as error:
+            current["seoul_error"] = str(error)
+        st.session_state[VIOLATION_LOOKUP_STATE_KEY] = current
+
+    if current.get("seoul_error"):
+        st.warning(current["seoul_error"])
+    seoul_reference = current.get("seoul")
+    if isinstance(seoul_reference, SeoulPortalReference):
+        _render_seoul_portal_reference(seoul_reference)
 
     if portal_clicked:
         current.pop("portal_error", None)
@@ -1397,12 +1473,9 @@ def render_app() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.title("🏢 건축물대장 조회시스템")
-    st.caption("국토교통부 건축HUB 공식 API 기반 · 서울·수원 지번 조회")
-    region = st.radio(
-        "조회 지역", ("서울", "수원"), horizontal=True,
-        key="search_region", on_change=_clear_search_results,
-    )
+    st.title("건축물대장 조회시스템")
+    st.caption("국토교통부 건축HUB 공식 API 기반 · 서울특별시 지번 조회")
+    region = "서울"
 
     with st.form("search_form", clear_on_submit=False):
         query = st.text_input(

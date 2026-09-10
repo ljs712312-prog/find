@@ -130,7 +130,8 @@ def test_seoul_ui_renders_commercial_result_and_no_gyeonggi_actions() -> None:
     app.session_state["search_outcome"] = _commercial_outcome()
     app.run()
     assert not app.exception
-    assert app.radio[0].value == "서울"
+    assert not app.radio
+    assert app.title[0].value == "건축물대장 조회시스템"
     assert "주차" in [metric.label for metric in app.metric]
     assert "9대" in [metric.value for metric in app.metric]
     assert any("제2종근린생활시설" in info.value for info in app.info)
@@ -138,13 +139,16 @@ def test_seoul_ui_renders_commercial_result_and_no_gyeonggi_actions() -> None:
     labels = [button.label for button in app.button]
     links = {item.label: item.url for item in app.get("link_button")}
     assert "경기부동산포털 1차 확인" not in labels
+    assert "서울포털 위반건축물 참고 확인" in labels
     assert "경기포털에서 직접 보기" not in links
     assert "세움터 대장 열람" in links and "정부24 대장 열람" in links
 
-    app.radio[0].set_value("수원").run()
+    app.text_input[0].set_value("수원시 망포동 6-11")
+    app.button[0].click().run()
     assert not app.exception
     assert "search_outcome" not in app.session_state
     assert not app.metric
+    assert any("서울특별시" in error.value for error in app.error)
 
 
 def test_ambiguous_search_clears_old_result_without_api_call() -> None:
