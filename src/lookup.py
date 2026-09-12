@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol, Sequence
 
 from .address import LandKey
 from .building_hub import (
+    BuildingHubAPIError,
     BuildingHubDecodeError,
     BuildingHubEnvelopeError,
     BuildingHubError,
@@ -450,6 +451,8 @@ def _recoverable_detail_failure(
         return UnavailableEndpoint(endpoint, "rate_limited")
     if isinstance(error, BuildingHubHTTPError) and error.retryable:
         return UnavailableEndpoint(endpoint, "gateway_http")
+    if isinstance(error, BuildingHubAPIError) and error.result_code == "05":
+        return UnavailableEndpoint(endpoint, "service_timeout")
     if isinstance(
         error,
         (BuildingHubDecodeError, BuildingHubEnvelopeError, BuildingHubPaginationError),
@@ -684,6 +687,7 @@ def lookup_buildings(
     land_key: LandKey,
     *,
     num_of_rows: int = 100,
+    skip_on_network_failure: bool = True,
 ) -> LookupResult:
     """Fetch and exactly join the six BuildingHUB register sections.
 
@@ -704,7 +708,7 @@ def lookup_buildings(
     warnings: list[str] = []
     network_path_failure: UnavailableEndpoint | None = None
     for endpoint in LOOKUP_ENDPOINTS:
-        if network_path_failure is not None and endpoint not in REQUIRED_LOOKUP_ENDPOINTS:
+        if skip_on_network_failure and network_path_failure is not None and endpoint not in REQUIRED_LOOKUP_ENDPOINTS:
             rows_by_endpoint[endpoint] = []
             unavailable_endpoints.append(
                 UnavailableEndpoint(endpoint, network_path_failure.reason, attempts=0)
@@ -889,6 +893,7 @@ def lookup_register(
     parsed_or_land_key: Any,
     *,
     num_of_rows: int = 100,
+    skip_on_network_failure: bool = True,
 ) -> RegisterSnapshot:
     """App-facing lookup accepting either ``ParsedAddress`` or ``LandKey``."""
 
@@ -898,4 +903,5 @@ def lookup_register(
         land_key = getattr(parsed_or_land_key, "land_key", None)
         if not isinstance(land_key, LandKey):
             raise TypeError("parsed_or_land_key는 ParsedAddress 또는 LandKey여야 합니다.")
-    return lookup_buildings(client, land_key, num_of_rows=num_of_rows)
+    return lookup_buildings(client, land_key, num_of_rows=num_of_rows,
+                           skip_on_network_failure=skip_on_network_failure)

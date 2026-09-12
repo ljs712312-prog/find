@@ -128,7 +128,7 @@ def test_exact_road_can_be_on_later_keyword_page_and_limit_stays_partial():
     assert result.matches and not result.complete
     with pytest.raises(CandidateSearchError):
         SeoulRoadClient(keyword_client=SeoulCandidateClient(
-            session=Session([requests.Timeout("private request details")]),
+            session=Session([requests.Timeout("private request details")]), max_retries=0,
         )).find(ROAD)
 
 

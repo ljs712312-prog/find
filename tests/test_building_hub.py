@@ -551,6 +551,19 @@ def test_result_code_23_is_retried() -> None:
     assert sleeps == [0.25]
 
 
+@pytest.mark.parametrize("status", [200, 503])
+def test_relay_service_timeout_retries_before_returning_success(status):
+    session = FakeSession(
+        requests.ConnectionError("direct unavailable"),
+        FakeResponse(status_code=status, payload=api_payload(None, code="05", message="SERVICETIMEOUT_ERROR")),
+        FakeResponse(payload=api_payload({"mgmBldrgstPk": "ok"})),
+    )
+    client = BuildingHubClient(KEY, session=session, relay_url=RELAY_URL,
+                               relay_hmac_secret=RELAY_SECRET, sleep=lambda _: None)
+    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [{"mgmBldrgstPk": "ok"}]
+    assert [call["method"] for call in session.calls] == ["GET", "POST", "POST"]
+
+
 def test_repeated_page_guard_prevents_infinite_pagination() -> None:
     same_items = [{"id": 1}, {"id": 2}]
     session = FakeSession(

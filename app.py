@@ -36,7 +36,7 @@ from src.gyeonggi_portal import (
     gyeonggi_portal_url,
 )
 from src.legacy import LegacyBuilding, load_legacy_frames, lookup_legacy
-from src.lookup import RegisterSnapshot, TitleSummary, UnitSummary, lookup_register, lookup_title_summaries
+from src.lookup import LookupDataError, RegisterSnapshot, TitleSummary, UnitSummary, lookup_title_summaries
 from src.permit_lookup import (
     PermitAreaCategory,
     PermitCaseReference,
@@ -55,6 +55,7 @@ from src.seoul_portal import (
 from src.seoul_search import LotNumber, SeoulLotResult, TitleCache, parse_lot_number, search_seoul_lot
 from src.seoul_candidates import CandidateSearchError, ParcelCandidates, SeoulCandidateClient
 from src.seoul_road import RoadAddress, RoadSearchResult, SeoulRoadClient, parse_road_address
+from src.register_loader import RegisterSectionCache, load_register_parallel
 from src.realty_price import (
     COLLECTIVE_HOUSING_PRICE_URL,
     INDIVIDUAL_HOUSING_PRICE_URL,
@@ -71,7 +72,7 @@ from src.vworld import (
 # Bump this whenever cached API response interpretation changes.  Streamlit
 # hashes this argument into each entry, so a hot deploy cannot keep serving a
 # snapshot produced by an older register-mapping rule.
-LOOKUP_CACHE_SCHEMA = "2026-09-10.1"
+LOOKUP_CACHE_SCHEMA = "2026-09-12.1"
 PERMIT_CACHE_SCHEMA = "2026-08-15.1"
 GOVERNMENT24_REGISTER_URL = (
     "https://www.gov.kr/mw/AA020InfoCappView.do?CappBizCD=15000000098"
@@ -93,6 +94,7 @@ class SearchOutcome:
     legacy: tuple[LegacyBuilding, ...] = ()
     api_error: str | None = None
     used_legacy: bool = False
+    elapsed_seconds: float = 0.0
 
 
 def _secret(name: str) -> str | None:
@@ -119,6 +121,12 @@ def _relay_fingerprint(url: str | None, hmac_secret: str | None) -> str:
     return hashlib.sha256(material).hexdigest()[:16]
 
 
+@st.cache_resource(max_entries=16, show_spinner=False)
+def _register_section_cache(key_fingerprint: str, relay_fingerprint: str,
+                            schema: str) -> RegisterSectionCache:
+    return RegisterSectionCache()
+
+
 @st.cache_data(ttl=24 * 60 * 60, max_entries=256, show_spinner=False)
 def _lookup_api_cached(
     sigungu_cd: str,
@@ -135,14 +143,12 @@ def _lookup_api_cached(
 ) -> RegisterSnapshot:
     # ``key_fingerprint`` invalidates old cached responses after key rotation;
     # the actual secret is excluded from Streamlit's cache key and never logged.
-    del cache_schema, key_fingerprint, relay_fingerprint
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
-    with BuildingHubClient(
-        _service_key,
-        relay_url=_relay_url,
-        relay_hmac_secret=_relay_hmac_secret,
-    ) as client:
-        return lookup_register(client, land_key)
+    cache = _register_section_cache(key_fingerprint, relay_fingerprint, cache_schema)
+    return load_register_parallel(land_key, lambda: BuildingHubClient(
+        _service_key, relay_url=_relay_url, relay_hmac_secret=_relay_hmac_secret,
+        max_retries=2, timeout=(3.05, 10.0),
+    ), cache)
 
 
 @st.cache_data(ttl=6 * 60 * 60, max_entries=256, show_spinner=False)
@@ -259,7 +265,7 @@ def _submit_address_search(query: str, region: str = "서울") -> None:
             raise lot_error
         with st.spinner("도로명 주소에 해당하는 지번을 찾고 있습니다…"):
             result = _seoul_road_cached(address)
-        if not result.complete:
+        if not result.complete or not result.matches:
             _seoul_road_cached.clear(address)
         st.session_state[SEOUL_ROAD_STATE_KEY] = result
         if result.complete and len(result.matches) == 1:
@@ -314,6 +320,8 @@ def _run_citywide_search(
             try:
                 with st.spinner("서울에서 같은 지번의 주소를 먼저 찾고 있습니다…"):
                     discovery = _seoul_candidates_cached(lot)
+                if not discovery.complete or not discovery.parcels:
+                    _seoul_candidates_cached.clear(lot)
                 candidates = discovery.parcels
                 discovery_complete, discovery_note = discovery.complete, discovery.note
             except CandidateSearchError as error:
@@ -475,6 +483,8 @@ def _friendly_api_error(error: BuildingHubError) -> str:
     if isinstance(error, BuildingHubValidationError):
         return "건축HUB 또는 중계 서버 설정이 올바르지 않습니다."
     if isinstance(error, BuildingHubAPIError):
+        if error.result_code == "05":
+            return "건축HUB 서버의 응답 시간이 초과됐습니다. 잠시 후 다시 조회해 주세요."
         if error.result_code == "10":
             return "건축HUB가 요청 파라미터 오류를 반환했습니다. 인증키 승인 동기화를 확인해 주세요."
         return f"건축HUB 오류가 발생했습니다. (코드 {error.result_code})"
@@ -510,6 +520,7 @@ def _search(
     relay_url: str | None = None,
     relay_hmac_secret: str | None = None,
 ) -> SearchOutcome:
+    started = perf_counter()
     parsed = parse_address(query, region=region)
     if service_key:
         try:
@@ -523,15 +534,14 @@ def _search(
                 relay_hmac_secret,
             )
             snapshot = _lookup_api_cached(*cache_args)
-            # Do not hold an incomplete gateway response for the normal 24-hour
-            # hour cache lifetime.  The result remains visible for this run,
-            # but the next explicit search retries only this parcel's entry.
-            if snapshot.is_partial:
+            # Rebuild incomplete/empty snapshots on retry. Successful individual
+            # sections remain cached, so only missing sections need new requests.
+            if snapshot.is_partial or not snapshot.buildings:
                 _lookup_api_cached.clear(*cache_args)
-        except BuildingHubError as error:
+        except (BuildingHubError, LookupDataError) as error:
             api_error = _friendly_api_error(error)
         else:
-            return SearchOutcome(parsed=parsed, snapshot=snapshot)
+            return SearchOutcome(parsed=parsed, snapshot=snapshot, elapsed_seconds=perf_counter() - started)
     else:
         api_error = "배포 설정에 건축HUB API 키가 없습니다."
 
@@ -544,6 +554,7 @@ def _search(
         legacy=legacy,
         api_error=api_error,
         used_legacy=bool(legacy),
+        elapsed_seconds=perf_counter() - started,
     )
 
 
@@ -1525,11 +1536,21 @@ def _render_building(
             )
 
 
+def _retry_detail_button(outcome: SearchOutcome, label: str) -> None:
+    if st.button(label, key="retry_register_detail"):
+        _clear_search_results(keep_citywide=True, keep_road=True)
+        _lookup_selected_address(outcome.parsed.canonical_address)
+        st.rerun()
+
+
 def _render_api(outcome: SearchOutcome) -> None:
     assert outcome.snapshot is not None
     snapshot = outcome.snapshot
+    if outcome.elapsed_seconds:
+        st.caption(f"이번 건축물 상세 조회 {outcome.elapsed_seconds:.1f}초")
     if not snapshot.buildings:
         st.error("공식 API 조회 결과가 없습니다. 지번과 산번지 여부를 확인해 주세요.")
+        _retry_detail_button(outcome, "건축물 다시 조회")
         _render_violation(outcome.parsed)
         _render_realty_price(outcome.parsed)
         return
@@ -1551,8 +1572,9 @@ def _render_api(outcome: SearchOutcome) -> None:
         )
         st.warning(
             f"건축HUB 상세자료 일부({delayed})가 일시 지연되었습니다. "
-            "표제부 중심 결과를 먼저 표시하며, 다시 조회하면 자동으로 보완됩니다."
+            "받은 정보는 먼저 표시하고, 다시 조회할 때 정상 응답은 재사용합니다."
         )
+        _retry_detail_button(outcome, "누락된 상세 정보 다시 확인")
     else:
         st.success(f"공식 건축HUB에서 건축물 {len(snapshot.buildings)}건을 확인했습니다.")
     st.caption(
@@ -1747,6 +1769,7 @@ def render_app() -> None:
             + ("보조 스냅샷에도 해당 지번이 없습니다." if outcome.parsed.is_suwon
                else "서울 건축물 정보는 API 연결이 복구된 뒤 다시 조회해 주세요.")
         )
+        _retry_detail_button(outcome, "건축물 다시 조회")
         _render_violation(outcome.parsed)
         _render_realty_price(outcome.parsed)
 

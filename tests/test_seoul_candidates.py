@@ -92,7 +92,7 @@ def test_invalid_pnu_is_partial_and_transport_error_is_not_no_result():
     result = SeoulCandidateClient(session=Session(payload([row(), row("bad", "2")]))).find(LOT)
     assert result.parcels and not result.complete and result.note
     with pytest.raises(CandidateSearchError) as error:
-        SeoulCandidateClient(session=Session(requests.Timeout("sensitive transport detail"))).find(LOT)
+        SeoulCandidateClient(session=Session(requests.Timeout("sensitive transport detail")), max_retries=0).find(LOT)
     assert "sensitive" not in str(error.value)
 
 
@@ -144,3 +144,37 @@ app._render_citywide_results(result)
 ''', default_timeout=10).run()
     assert not app.exception and not app.success
     assert any("주소 검색 연결 실패" in item.value for item in app.warning)
+
+
+def test_transient_portal_timeout_retries_exact_page_once():
+    session = Session(requests.Timeout("private details"), payload([row()]))
+    result = SeoulCandidateClient(session=session, sleep=lambda _: None).find(LOT)
+    assert result.complete and len(result.parcels) == 1
+    assert [c["data"]["startCount"] for c in session.calls] == [0, 0]
+
+
+def test_next_page_outage_preserves_found_candidates_as_incomplete():
+    first = [row(doc=str(i)) for i in range(100)]
+    session = Session(payload(first, 101), requests.Timeout(), requests.Timeout())
+    result = SeoulCandidateClient(session=session, sleep=lambda _: None).find(LOT)
+    assert result.parcels and not result.complete and "다음 페이지" in result.note
+    assert [c["data"]["startCount"] for c in session.calls] == [0, 100, 100]
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_empty_or_partial_discovery_is_removed_from_streamlit_cache(monkeypatch, complete):
+    class Cached:
+        cleared = []
+        def __call__(self, lot):
+            return ParcelCandidates((), complete, 100, 1000, "일부 후보")
+        def clear(self, lot):
+            self.cleared.append(lot)
+    cached = Cached()
+    monkeypatch.setattr(app_module, "_seoul_candidates_cached", cached)
+    monkeypatch.setattr(app_module, "_secret", lambda name: "test-key" if name == "BUILDING_HUB_API_KEY" else None)
+    app = AppTest.from_string('''
+import app
+from src.seoul_search import parse_lot_number
+app._run_citywide_search(parse_lot_number("332-37"))
+''', default_timeout=10).run()
+    assert not app.exception and cached.cleared == [LOT]

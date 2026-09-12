@@ -573,7 +573,10 @@ class BuildingHubClient:
                     raise
                 except (BuildingHubAuthError, BuildingHubQuotaError):
                     raise
-                except BuildingHubAPIError:
+                except BuildingHubAPIError as error:
+                    if error.retryable and relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                        self._backoff(relay_attempt - 1, self._retry_after(response))
+                        continue
                     raise
                 except (BuildingHubDecodeError, BuildingHubEnvelopeError):
                     pass
@@ -608,6 +611,11 @@ class BuildingHubClient:
                         relay_attempt - 1,
                         self._retry_after(response),
                     )
+                    continue
+                raise
+            except BuildingHubAPIError as error:
+                if error.retryable and relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                    self._backoff(relay_attempt - 1, self._retry_after(response))
                     continue
                 raise
             except (BuildingHubDecodeError, BuildingHubEnvelopeError):
