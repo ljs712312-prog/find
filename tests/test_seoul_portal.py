@@ -166,7 +166,8 @@ app._render_violation(parse_address("역삼동 737", region="서울"))
     else:
         assert "목록 1건" in messages and "위반이 없다는 뜻은 아닙니다" in messages
     links = {item.label for item in app.get("link_button")}
-    assert "세움터 대장 열람" in links
+    assert "세움터 대장 열람" not in links
+    assert "정부24 대장 열람" not in links
     assert "서울부동산정보광장 직접 보기" in links
     direct_link = next(item for item in app.get("link_button") if item.label == "서울부동산정보광장 직접 보기")
     assert direct_link.proto.url == seoul_portal_url(LAND)

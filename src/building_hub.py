@@ -192,11 +192,18 @@ class BuildingHubClient:
         sleep: Callable[[float], None] = time.sleep,
         relay_url: str | None = None,
         relay_hmac_secret: str | None = None,
+        relay_timeout: float | tuple[float, float] | None = None,
+        relay_max_attempts: int | None = None,
     ) -> None:
         key = str(service_key).strip() if service_key is not None else ""
         if not key:
             raise BuildingHubValidationError("service_key must not be empty")
         self._validate_timeout(timeout)
+        effective_relay_timeout = self._RELAY_TIMEOUT if relay_timeout is None else relay_timeout
+        effective_relay_attempts = self._RELAY_MAX_ATTEMPTS if relay_max_attempts is None else relay_max_attempts
+        self._validate_timeout(effective_relay_timeout)
+        if isinstance(effective_relay_attempts, bool) or not isinstance(effective_relay_attempts, int) or effective_relay_attempts < 1:
+            raise BuildingHubValidationError("relay_max_attempts must be a positive integer")
         if not isinstance(max_retries, int) or max_retries < 0:
             raise BuildingHubValidationError("max_retries must be a non-negative integer")
         if backoff_factor < 0:
@@ -208,6 +215,7 @@ class BuildingHubClient:
         self._session = session if session is not None else requests.Session()
         self._owns_session = session is None
         self._timeout = timeout
+        self._relay_timeout, self._relay_max_attempts = effective_relay_timeout, effective_relay_attempts
         self._max_retries = max_retries
         self._backoff_factor = float(backoff_factor)
         self._max_pages = max_pages
@@ -495,7 +503,7 @@ class BuildingHubClient:
         body = self._canonical_json({"params": dict(params)})
         url = f"{config.base_url}/v1/building-hub/{quote(endpoint, safe='')}"
 
-        for relay_attempt in range(1, self._RELAY_MAX_ATTEMPTS + 1):
+        for relay_attempt in range(1, self._relay_max_attempts + 1):
             # Generate a fresh signed nonce for each attempt so this remains
             # compatible with a strict replay cache if one is enabled later.
             timestamp = str(int(time.time()))
@@ -523,11 +531,11 @@ class BuildingHubClient:
                     url,
                     data=body,
                     headers=headers,
-                    timeout=self._RELAY_TIMEOUT,
+                    timeout=self._relay_timeout,
                 )
             except requests.exceptions.RequestException as error:
                 reason = self._network_failure_reason(error)
-                if relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                if relay_attempt < self._relay_max_attempts:
                     LOGGER.warning(
                         "BuildingHUB relay transport failed; retrying "
                         "endpoint=%s reason=%s relay_attempt=%s",
@@ -564,7 +572,7 @@ class BuildingHubClient:
                     payload = self._decode_payload(response)
                     self._extract_page(payload)
                 except BuildingHubRateLimitError:
-                    if relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                    if relay_attempt < self._relay_max_attempts:
                         self._backoff(
                             relay_attempt - 1,
                             self._retry_after(response),
@@ -574,7 +582,7 @@ class BuildingHubClient:
                 except (BuildingHubAuthError, BuildingHubQuotaError):
                     raise
                 except BuildingHubAPIError as error:
-                    if error.retryable and relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                    if error.retryable and relay_attempt < self._relay_max_attempts:
                         self._backoff(relay_attempt - 1, self._retry_after(response))
                         continue
                     raise
@@ -583,7 +591,7 @@ class BuildingHubClient:
 
                 if (
                     self._retryable_http_status(status)
-                    and relay_attempt < self._RELAY_MAX_ATTEMPTS
+                    and relay_attempt < self._relay_max_attempts
                 ):
                     LOGGER.warning(
                         "BuildingHUB relay returned transient HTTP status; retrying "
@@ -606,7 +614,7 @@ class BuildingHubClient:
                 payload = self._decode_payload(response)
                 return self._extract_page(payload)
             except BuildingHubRateLimitError:
-                if relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                if relay_attempt < self._relay_max_attempts:
                     self._backoff(
                         relay_attempt - 1,
                         self._retry_after(response),
@@ -614,12 +622,12 @@ class BuildingHubClient:
                     continue
                 raise
             except BuildingHubAPIError as error:
-                if error.retryable and relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                if error.retryable and relay_attempt < self._relay_max_attempts:
                     self._backoff(relay_attempt - 1, self._retry_after(response))
                     continue
                 raise
             except (BuildingHubDecodeError, BuildingHubEnvelopeError):
-                if relay_attempt < self._RELAY_MAX_ATTEMPTS:
+                if relay_attempt < self._relay_max_attempts:
                     LOGGER.warning(
                         "BuildingHUB relay returned an incomplete envelope; retrying "
                         "endpoint=%s relay_attempt=%s",

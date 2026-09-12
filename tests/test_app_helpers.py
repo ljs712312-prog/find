@@ -80,28 +80,18 @@ def test_relay_configuration_error_and_cache_identity_are_safe() -> None:
     )
 
 
-def test_partial_snapshot_is_not_kept_in_the_long_lived_lookup_cache(
-    monkeypatch: object,
-) -> None:
-    class CachedLookup:
-        def __init__(self) -> None:
-            self.calls: list[tuple[object, ...]] = []
-            self.cleared: list[tuple[object, ...]] = []
-
-        def __call__(self, *args: object) -> SimpleNamespace:
-            self.calls.append(args)
-            return SimpleNamespace(is_partial=True)
-
-        def clear(self, *args: object) -> None:
-            self.cleared.append(args)
-
-    cached_lookup = CachedLookup()
-    monkeypatch.setattr(app_module, "_lookup_api_cached", cached_lookup)  # type: ignore[attr-defined]
-
-    outcome = app_module._search("망포동 6-11", "test-service-key")
-
-    assert outcome.snapshot is not None
-    assert cached_lookup.cleared == cached_lookup.calls
+def test_partial_result_runs_the_section_loader_again_on_retry(monkeypatch) -> None:
+    calls = []
+    def lookup(*args, on_update=None):
+        calls.append(args)
+        result = SimpleNamespace(is_partial=True, buildings=())
+        on_update(result, frozenset())
+        return result
+    monkeypatch.setattr(app_module, "_lookup_focus_api", lookup)
+    first = app_module._search("망포동 6-11", "test-service-key")
+    second = app_module._search("망포동 6-11", "test-service-key")
+    assert first.snapshot.is_partial and second.snapshot.is_partial
+    assert len(calls) == 2 and calls[0] == calls[1]
 
 
 def test_permit_auth_error_is_separate_and_does_not_echo_secret() -> None:

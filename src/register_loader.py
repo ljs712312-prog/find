@@ -1,12 +1,12 @@
 """Bounded parallel section retrieval with success-only, single-flight caching."""
 from collections import OrderedDict
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from threading import Lock, Semaphore, local
 import time
 
 from src.building_hub import BuildingHubError
-from src.lookup import LOOKUP_ENDPOINTS, TITLE_ENDPOINT, LookupDataError, lookup_register
+from src.lookup import BASIS_ENDPOINT, FLOOR_ENDPOINT, LOOKUP_ENDPOINTS, TITLE_ENDPOINT, LookupDataError, lookup_register
 
 
 class RegisterSectionCache:
@@ -81,6 +81,51 @@ class _FetchedSections:
         if isinstance(result, BuildingHubError):
             raise result
         return result
+
+
+def load_register_focus(land_key, client_factory, cache, *, on_update=None):
+    """Fetch only titles and floors concurrently; emit titles without waiting.
+
+    Request the PK relationship graph only if exact parcel floor rows could not
+    attach directly to a title. Unit, price, permit and recap APIs are not used.
+    """
+    def fetch(endpoint):
+        def request():
+            with client_factory() as client:
+                return client.fetch_all(endpoint, land_key, num_of_rows=100)
+        return cache.get(endpoint, land_key, request)
+
+    sections = {}
+    def snapshot():
+        return lookup_register(_FetchedSections(sections), land_key,
+                               skip_on_network_failure=False,
+                               endpoints=tuple(e for e in LOOKUP_ENDPOINTS if e in sections))
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="register-focus") as pool:
+        pending = {pool.submit(fetch, endpoint): endpoint for endpoint in (TITLE_ENDPOINT, FLOOR_ENDPOINT)}
+        for future in as_completed(pending):
+            endpoint = pending[future]
+            try:
+                sections[endpoint] = future.result()
+            except BuildingHubError as error:
+                sections[endpoint] = error
+            if TITLE_ENDPOINT in sections:
+                current = snapshot()
+                if on_update:
+                    waiting = frozenset({TITLE_ENDPOINT, FLOOR_ENDPOINT} - sections.keys())
+                    if not waiting and current.unlinked_floors:
+                        waiting = frozenset({BASIS_ENDPOINT})
+                    on_update(current, waiting)
+    result = snapshot()
+    if result.unlinked_floors:
+        try:
+            sections[BASIS_ENDPOINT] = fetch(BASIS_ENDPOINT)
+        except BuildingHubError as error:
+            sections[BASIS_ENDPOINT] = error
+        result = snapshot()
+        if on_update:
+            on_update(result, frozenset())
+    return result
 
 
 def load_register_parallel(land_key, client_factory, cache):

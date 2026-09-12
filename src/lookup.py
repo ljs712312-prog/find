@@ -688,8 +688,9 @@ def lookup_buildings(
     *,
     num_of_rows: int = 100,
     skip_on_network_failure: bool = True,
+    endpoints: Sequence[str] = LOOKUP_ENDPOINTS,
 ) -> LookupResult:
-    """Fetch and exactly join the six BuildingHUB register sections.
+    """Fetch and exactly join the requested BuildingHUB register sections.
 
     Client/network exceptions are intentionally allowed to propagate so the UI
     can distinguish an API failure from an empty, successfully queried ledger.
@@ -702,12 +703,14 @@ def lookup_buildings(
     ):
         raise ValueError("num_of_rows는 1 이상 100 이하의 정수여야 합니다.")
 
-    rows_by_endpoint: dict[str, list[Mapping[str, Any]]] = {}
+    if TITLE_ENDPOINT not in endpoints or len(set(endpoints)) != len(endpoints) or not set(endpoints) <= set(LOOKUP_ENDPOINTS):
+        raise ValueError("조회 항목에는 표제부가 포함되어야 하며 지원 항목만 한 번씩 지정해야 합니다.")
+    rows_by_endpoint: dict[str, list[Mapping[str, Any]]] = {endpoint: [] for endpoint in LOOKUP_ENDPOINTS}
     stats: list[EndpointStats] = []
     unavailable_endpoints: list[UnavailableEndpoint] = []
     warnings: list[str] = []
     network_path_failure: UnavailableEndpoint | None = None
-    for endpoint in LOOKUP_ENDPOINTS:
+    for endpoint in endpoints:
         if skip_on_network_failure and network_path_failure is not None and endpoint not in REQUIRED_LOOKUP_ENDPOINTS:
             rows_by_endpoint[endpoint] = []
             unavailable_endpoints.append(
@@ -894,6 +897,7 @@ def lookup_register(
     *,
     num_of_rows: int = 100,
     skip_on_network_failure: bool = True,
+    endpoints: Sequence[str] = LOOKUP_ENDPOINTS,
 ) -> RegisterSnapshot:
     """App-facing lookup accepting either ``ParsedAddress`` or ``LandKey``."""
 
@@ -904,4 +908,4 @@ def lookup_register(
         if not isinstance(land_key, LandKey):
             raise TypeError("parsed_or_land_key는 ParsedAddress 또는 LandKey여야 합니다.")
     return lookup_buildings(client, land_key, num_of_rows=num_of_rows,
-                           skip_on_network_failure=skip_on_network_failure)
+                           skip_on_network_failure=skip_on_network_failure, endpoints=endpoints)

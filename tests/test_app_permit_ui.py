@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from pathlib import Path
 from types import SimpleNamespace
 
 from streamlit.testing.v1 import AppTest
@@ -20,7 +19,15 @@ from src.permit_lookup import (
 )
 
 
-APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
+# The permit renderer remains a library helper, outside the focused Seoul UI.
+PERMIT_TEST_APP = """
+import streamlit as st
+from app import render_app, _render_permit_reference
+render_app()
+outcome = st.session_state.get("search_outcome")
+if outcome and outcome.snapshot:
+    _render_permit_reference(outcome)
+"""
 LAND = LandKey("41113", "12600", "0", "0092", "0007")
 
 
@@ -222,7 +229,7 @@ def _rendered_text(app: AppTest) -> str:
 
 
 def test_permit_lookup_waits_for_button_click_and_failure_is_isolated() -> None:
-    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app = AppTest.from_string(PERMIT_TEST_APP, default_timeout=10)
     app.session_state["search_outcome"] = _base_outcome()
     app.run()
 
@@ -258,7 +265,7 @@ def test_matching_case_is_primary_and_other_history_is_unconfirmed() -> None:
         ho_name="101호",
         matches_register_approval_date=False,
     )
-    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app = AppTest.from_string(PERMIT_TEST_APP, default_timeout=10)
     app.session_state["search_outcome"] = _base_outcome()
     app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(
         reference=_reference(current, old)
@@ -280,7 +287,7 @@ def test_matching_case_is_primary_and_other_history_is_unconfirmed() -> None:
 
 
 def test_precision_fallback_keeps_non_household_areas_visibly_separate() -> None:
-    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app = AppTest.from_string(PERMIT_TEST_APP, default_timeout=10)
     app.session_state["search_outcome"] = _base_outcome()
     app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(
         reference=_precision_reference(_precision_fallback_case())
@@ -314,7 +321,7 @@ def test_raw_basis_rows_rejected_by_land_validation_are_not_reported_as_zero() -
         warnings=("요청 지번과 정확히 일치하지 않는 2개 행을 제외했습니다.",),
         source_as_of=None,
     )
-    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app = AppTest.from_string(PERMIT_TEST_APP, default_timeout=10)
     app.session_state["search_outcome"] = _base_outcome()
     app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(reference=reference)
     app.run()
@@ -334,7 +341,7 @@ def test_no_approval_date_match_marks_every_case_unconfirmed() -> None:
         ho_name="101호",
         matches_register_approval_date=False,
     )
-    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app = AppTest.from_string(PERMIT_TEST_APP, default_timeout=10)
     app.session_state["search_outcome"] = _base_outcome()
     app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(
         reference=_reference(old)
@@ -363,7 +370,7 @@ def test_permit_state_for_another_exact_lot_is_not_rendered() -> None:
         matches_register_approval_date=True,
     )
     another_lot = LandKey("41113", "12600", "0", "0092", "0008")
-    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app = AppTest.from_string(PERMIT_TEST_APP, default_timeout=10)
     app.session_state["search_outcome"] = _base_outcome()
     app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(
         reference=_reference(current),
@@ -385,7 +392,7 @@ def test_new_search_clears_permit_session_state() -> None:
         ho_name="201호",
         matches_register_approval_date=True,
     )
-    app = AppTest.from_file(str(APP_PATH), default_timeout=10)
+    app = AppTest.from_string(PERMIT_TEST_APP, default_timeout=10)
     app.session_state["search_outcome"] = _base_outcome()
     app.session_state[PERMIT_LOOKUP_STATE_KEY] = _permit_state(
         reference=_reference(current)

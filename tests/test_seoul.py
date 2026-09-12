@@ -75,13 +75,13 @@ def test_seoul_cannot_fall_back_to_same_named_suwon_parcel(monkeypatch) -> None:
     }])
     assert lookup_legacy(parsed, master, pd.DataFrame()) == ()
 
-    def unavailable(*args):
+    def unavailable(*args, **kwargs):
         raise BuildingHubNetworkError(endpoint=TITLE_ENDPOINT, attempts=1, reason="timeout")
 
     def forbidden():
         pytest.fail("Seoul must not read Suwon snapshots")
 
-    monkeypatch.setattr(app_module, "_lookup_api_cached", unavailable)
+    monkeypatch.setattr(app_module, "_lookup_focus_api", unavailable)
     monkeypatch.setattr(app_module, "_legacy_frames", forbidden)
     outcome = app_module._search("장안동 1", "test-key", region="서울")
     assert outcome.api_error and not outcome.legacy and not outcome.used_legacy
@@ -141,7 +141,9 @@ def test_seoul_ui_renders_commercial_result_and_no_gyeonggi_actions() -> None:
     assert "경기부동산포털 1차 확인" not in labels
     assert "서울포털 위반건축물 참고 확인" in labels
     assert "경기포털에서 직접 보기" not in links
-    assert "세움터 대장 열람" in links and "정부24 대장 열람" in links
+    assert "세움터 대장 열람" not in links and "정부24 대장 열람" not in links
+    assert not any("가격" in label for label in links)
+    assert not any("인허가" in label for label in labels)
 
     app.text_input[0].set_value("수원시 망포동 6-11")
     app.button[0].click().run()

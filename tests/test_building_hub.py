@@ -582,6 +582,28 @@ def test_repeated_page_guard_prevents_infinite_pagination() -> None:
     assert len(session.calls) == 2
 
 
+def test_focused_timeout_and_relay_attempt_limit_are_honored():
+    session = FakeSession(
+        requests.ReadTimeout("direct unavailable"),
+        FakeResponse(payload=api_payload(None, code="05", message="SERVICETIMEOUT_ERROR")),
+    )
+    client = BuildingHubClient(
+        KEY, session=session, relay_url=RELAY_URL, relay_hmac_secret=RELAY_SECRET,
+        timeout=(2.0, 4.0), max_retries=1, relay_timeout=(2.0, 5.0), relay_max_attempts=1,
+    )
+    with pytest.raises(BuildingHubAPIError) as error:
+        client.fetch_all("getBrFlrOulnInfo", LAND_DICT)
+    assert error.value.result_code == "05"
+    assert [call["method"] for call in session.calls] == ["GET", "POST"]
+    assert [call["timeout"] for call in session.calls] == [(2.0, 4.0), (2.0, 5.0)]
+
+
+@pytest.mark.parametrize("attempts", [0, -1, True, 1.5])
+def test_invalid_relay_attempt_limit_is_rejected(attempts):
+    with pytest.raises(BuildingHubValidationError):
+        BuildingHubClient(KEY, relay_max_attempts=attempts)
+
+
 def test_scalar_item_is_an_envelope_error() -> None:
     session = FakeSession(FakeResponse(payload=api_payload("not-an-object")))
     client = BuildingHubClient(KEY, session=session, max_retries=0)

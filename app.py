@@ -55,7 +55,7 @@ from src.seoul_portal import (
 from src.seoul_search import LotNumber, SeoulLotResult, TitleCache, parse_lot_number, search_seoul_lot
 from src.seoul_candidates import CandidateSearchError, ParcelCandidates, SeoulCandidateClient
 from src.seoul_road import RoadAddress, RoadSearchResult, SeoulRoadClient, parse_road_address
-from src.register_loader import RegisterSectionCache, load_register_parallel
+from src.register_loader import RegisterSectionCache, load_register_focus
 from src.realty_price import (
     COLLECTIVE_HOUSING_PRICE_URL,
     INDIVIDUAL_HOUSING_PRICE_URL,
@@ -72,11 +72,8 @@ from src.vworld import (
 # Bump this whenever cached API response interpretation changes.  Streamlit
 # hashes this argument into each entry, so a hot deploy cannot keep serving a
 # snapshot produced by an older register-mapping rule.
-LOOKUP_CACHE_SCHEMA = "2026-09-12.1"
+LOOKUP_CACHE_SCHEMA = "2026-09-12.focus.1"
 PERMIT_CACHE_SCHEMA = "2026-08-15.1"
-GOVERNMENT24_REGISTER_URL = (
-    "https://www.gov.kr/mw/AA020InfoCappView.do?CappBizCD=15000000098"
-)
 EAIS_REGISTER_URL = "https://www.eais.go.kr/?actionFlag=archCprtrList"
 PUBLIC_DATA_REQUEST_URL = (
     "https://www.data.go.kr/tcs/dor/insertDataOfferReqstProcssView.do"
@@ -95,6 +92,7 @@ class SearchOutcome:
     api_error: str | None = None
     used_legacy: bool = False
     elapsed_seconds: float = 0.0
+    first_result_seconds: float = 0.0
 
 
 def _secret(name: str) -> str | None:
@@ -127,8 +125,7 @@ def _register_section_cache(key_fingerprint: str, relay_fingerprint: str,
     return RegisterSectionCache()
 
 
-@st.cache_data(ttl=24 * 60 * 60, max_entries=256, show_spinner=False)
-def _lookup_api_cached(
+def _lookup_focus_api(
     sigungu_cd: str,
     bjdong_cd: str,
     plat_gb_cd: str,
@@ -140,15 +137,16 @@ def _lookup_api_cached(
     _service_key: str,
     _relay_url: str | None,
     _relay_hmac_secret: str | None,
+    *, on_update=None,
 ) -> RegisterSnapshot:
     # ``key_fingerprint`` invalidates old cached responses after key rotation;
     # the actual secret is excluded from Streamlit's cache key and never logged.
     land_key = LandKey(sigungu_cd, bjdong_cd, plat_gb_cd, bun, ji)
     cache = _register_section_cache(key_fingerprint, relay_fingerprint, cache_schema)
-    return load_register_parallel(land_key, lambda: BuildingHubClient(
+    return load_register_focus(land_key, lambda: BuildingHubClient(
         _service_key, relay_url=_relay_url, relay_hmac_secret=_relay_hmac_secret,
-        max_retries=2, timeout=(3.05, 10.0),
-    ), cache)
+        max_retries=1, timeout=(2.0, 4.0), relay_timeout=(2.0, 5.0), relay_max_attempts=1,
+    ), cache, on_update=on_update)
 
 
 @st.cache_data(ttl=6 * 60 * 60, max_entries=256, show_spinner=False)
@@ -243,12 +241,23 @@ def _seoul_road_cached(address: RoadAddress) -> RoadSearchResult:
 
 
 def _lookup_selected_address(query: str, region: str = "서울") -> None:
-    with st.spinner("건축HUB 건축물 정보를 확인하고 있습니다…"):
-        st.session_state.search_outcome = _search(
-            query, _secret("BUILDING_HUB_API_KEY"), region=region,
-            relay_url=_secret("BUILDING_HUB_RELAY_URL") or DEFAULT_BUILDING_HUB_RELAY_URL,
-            relay_hmac_secret=_secret("BUILDING_HUB_RELAY_HMAC_SECRET"),
-        )
+    preview = st.empty()
+    def show_received(snapshot, pending):
+        if pending and snapshot.buildings:
+            with preview.container():
+                st.caption("건물 기본정보를 먼저 표시합니다. 층별 용도·면적 확인 중…")
+                for index, building in enumerate(snapshot.buildings):
+                    _render_building(building, index, pending_floor=True)
+    try:
+        with st.spinner("건물 용도와 층별 현황을 확인하고 있습니다…"):
+            st.session_state.search_outcome = _search(
+                query, _secret("BUILDING_HUB_API_KEY"), region=region,
+                relay_url=_secret("BUILDING_HUB_RELAY_URL") or DEFAULT_BUILDING_HUB_RELAY_URL,
+                relay_hmac_secret=_secret("BUILDING_HUB_RELAY_HMAC_SECRET"),
+                on_update=show_received,
+            )
+    finally:
+        preview.empty()
 
 
 def _submit_address_search(query: str, region: str = "서울") -> None:
@@ -429,12 +438,7 @@ def _render_citywide_results(result: SeoulLotResult) -> None:
         _clear_search_results(keep_citywide=True)
     if st.button("선택한 주소 상세 조회", disabled=selected is None):
         _clear_search_results(keep_citywide=True)
-        with st.spinner("선택한 건물의 층별·호실별 상세 정보를 확인하고 있습니다…"):
-            st.session_state.search_outcome = _search(
-                selected, _secret("BUILDING_HUB_API_KEY"), region="서울",
-                relay_url=_secret("BUILDING_HUB_RELAY_URL") or DEFAULT_BUILDING_HUB_RELAY_URL,
-                relay_hmac_secret=_secret("BUILDING_HUB_RELAY_HMAC_SECRET"),
-            )
+        _lookup_selected_address(selected)
 
 
 def _friendly_api_error(error: BuildingHubError) -> str:
@@ -519,8 +523,16 @@ def _search(
     region: str | None = None,
     relay_url: str | None = None,
     relay_hmac_secret: str | None = None,
+    on_update=None,
 ) -> SearchOutcome:
     started = perf_counter()
+    first_result = 0.0
+    def received(snapshot, pending):
+        nonlocal first_result
+        if snapshot.buildings and not first_result:
+            first_result = perf_counter() - started
+        if on_update:
+            on_update(snapshot, pending)
     parsed = parse_address(query, region=region)
     if service_key:
         try:
@@ -533,15 +545,13 @@ def _search(
                 relay_url,
                 relay_hmac_secret,
             )
-            snapshot = _lookup_api_cached(*cache_args)
-            # Rebuild incomplete/empty snapshots on retry. Successful individual
-            # sections remain cached, so only missing sections need new requests.
-            if snapshot.is_partial or not snapshot.buildings:
-                _lookup_api_cached.clear(*cache_args)
+            # Cache only successful raw sections, and rebuild the focused view.
+            snapshot = _lookup_focus_api(*cache_args, on_update=received)
         except (BuildingHubError, LookupDataError) as error:
             api_error = _friendly_api_error(error)
         else:
-            return SearchOutcome(parsed=parsed, snapshot=snapshot, elapsed_seconds=perf_counter() - started)
+            return SearchOutcome(parsed=parsed, snapshot=snapshot, elapsed_seconds=perf_counter() - started,
+                                 first_result_seconds=first_result)
     else:
         api_error = "배포 설정에 건축HUB API 키가 없습니다."
 
@@ -640,8 +650,13 @@ def _unit_floor_label(unit: UnitSummary) -> str:
 
 
 def _floor_table(building: TitleSummary) -> pd.DataFrame:
+    return _floor_rows(building.floors)
+
+
+def _floor_rows(floors, *, include_dong: bool = False) -> pd.DataFrame:
     rows = [
         {
+            **({"동": floor.dong_name or "-"} if include_dong else {}),
             "층": floor.floor_name
             or (
                 f"{floor.floor_number}층"
@@ -654,7 +669,7 @@ def _floor_table(building: TitleSummary) -> pd.DataFrame:
             "구조": floor.structure_name or "-",
             "면적(㎡)": _decimal_text(floor.area, suffix="").strip(),
         }
-        for floor in building.floors
+        for floor in floors
     ]
     rows.sort(key=lambda item: _natural_key(item["층"]))
     return pd.DataFrame(rows)
@@ -1161,7 +1176,7 @@ def _render_vworld_reference(reference: ViolationReference) -> None:
     if reference.state is ViolationState.YES:
         st.error(
             f"VWorld 참고자료상 이 필지에 위반 표시가 있습니다{tail}. "
-            "정부24 발급 대장으로 최종 확인해 주세요."
+            "발급 대장으로 최종 확인해 주세요."
         )
     elif reference.state is ViolationState.NO:
         st.info(
@@ -1207,7 +1222,7 @@ def _render_seoul_portal_reference(reference: SeoulPortalReference) -> None:
     elif reference.state is SeoulPortalState.FLAGGED:
         st.warning(
             "서울포털 반환 자료에 위반 표시가 있습니다. "
-            "표시된 건물·동을 확인하고 세움터·정부24 발급 대장으로 최종 확인해 주세요."
+            "표시된 건물·동을 확인하고 발급 대장으로 최종 확인해 주세요."
         )
     else:
         st.info(
@@ -1280,8 +1295,6 @@ def _render_violation(parsed: ParsedAddress) -> None:
                 seoul_portal_url(parsed.land_key),
                 help="조회한 지번이 입력된 상태로 서울부동산정보광장의 검색 결과를 엽니다.",
             )
-            st.link_button("세움터 대장 열람", EAIS_REGISTER_URL)
-        st.link_button("정부24 대장 열람", GOVERNMENT24_REGISTER_URL)
 
     if seoul_clicked:
         current.pop("seoul_error", None)
@@ -1459,6 +1472,8 @@ def _render_building(
     index: int,
     *,
     unavailable_endpoints: frozenset[str] = frozenset(),
+    pending_floor: bool = False,
+    unlinked_floor: bool = False,
 ) -> None:
     label_parts = tuple(
         dict.fromkeys(
@@ -1494,46 +1509,17 @@ def _render_building(
                 hide_index=True,
                 width="stretch",
             )
+        elif pending_floor:
+            st.info("층별 용도·면적을 가져오는 중입니다…")
         elif "getBrFlrOulnInfo" in unavailable_endpoints:
             st.warning(
                 "층별개요 API 응답이 이번 조회에서 지연되어 층별 정보는 표시하지 않습니다."
             )
+        elif unlinked_floor:
+            st.warning("건물 연결을 확인하지 못한 층별 자료는 아래에 별도로 표시합니다.")
         else:
             st.info("이 건축물의 층별개요가 공개 API에 없습니다.")
 
-        if building.units:
-            heading = "집합건물 호실별 면적" if building.is_collective else "API가 명시적으로 반환한 호별 정보"
-            st.markdown(f"#### {heading}")
-            st.dataframe(
-                _unit_table(building),
-                hide_index=True,
-                width="stretch",
-            )
-            st.caption(
-                "전유·공용 면적은 호실 관리 PK가 같은 모든 면적 행을 구분해 합산했습니다. "
-                "‘전유+공용’은 앱의 참고 계산값입니다."
-            )
-            if "getBrExposPubuseAreaInfo" in unavailable_endpoints:
-                st.warning(
-                    "전유·공용면적 API 응답이 지연되어 일부 호실 면적이 비어 있을 수 있습니다."
-                )
-        elif building.is_collective:
-            if {
-                "getBrBasisOulnInfo",
-                "getBrExposInfo",
-                "getBrExposPubuseAreaInfo",
-            } & unavailable_endpoints:
-                st.warning(
-                    "호실·면적 상세 API 응답이 지연되어 이 표제부의 전유부 연결은 이번에 확인하지 못했습니다."
-                )
-            else:
-                st.warning("집합건물이지만 공개 API에서 이 표제부에 연결되는 전유부를 확인하지 못했습니다.")
-
-        if building.is_multi_family_house:
-            st.warning(
-                "다가구주택 호(가구)별 면적대장(별지 제9호)은 현재 건축물대장 공개 API가 제공하지 않습니다. "
-                "아래 건축인허가 호별면적은 별도 참고자료이며, 층 면적을 가구 수로 나누어 추정하지 않았습니다."
-            )
 
 
 def _retry_detail_button(outcome: SearchOutcome, label: str) -> None:
@@ -1547,12 +1533,14 @@ def _render_api(outcome: SearchOutcome) -> None:
     assert outcome.snapshot is not None
     snapshot = outcome.snapshot
     if outcome.elapsed_seconds:
-        st.caption(f"이번 건축물 상세 조회 {outcome.elapsed_seconds:.1f}초")
+        st.caption(
+            f"기본정보 {outcome.first_result_seconds:.1f}초 · "
+            f"층별 확인까지 {outcome.elapsed_seconds:.1f}초"
+        )
     if not snapshot.buildings:
         st.error("공식 API 조회 결과가 없습니다. 지번과 산번지 여부를 확인해 주세요.")
         _retry_detail_button(outcome, "건축물 다시 조회")
         _render_violation(outcome.parsed)
-        _render_realty_price(outcome.parsed)
         return
 
     unavailable_snapshot_endpoints = tuple(
@@ -1581,18 +1569,27 @@ def _render_api(outcome: SearchOutcome) -> None:
         f"정규화 주소: {outcome.parsed.canonical_address} · "
         f"대장 레코드 생성일: {_date(snapshot.source_as_of)} · 월간 갱신 API"
     )
-    _render_violation(outcome.parsed)
-    _render_realty_price(outcome.parsed, snapshot.buildings)
     unavailable_endpoints = frozenset(
         item.endpoint for item in unavailable_snapshot_endpoints
     )
+    unlinked_floors = getattr(snapshot, "unlinked_floors", ())
     for index, building in enumerate(snapshot.buildings):
         _render_building(
             building,
             index,
             unavailable_endpoints=unavailable_endpoints,
+            unlinked_floor=bool(unlinked_floors),
         )
-    _render_permit_reference(outcome)
+    if unlinked_floors:
+        st.warning(
+            "같은 지번에서 받은 층별 자료 중 건물 연결을 확인하지 못한 항목이 있습니다. "
+            "아래 원자료를 별도로 표시하며, 특정 건물의 층이나 면적에 합산하지 않습니다."
+        )
+        with st.expander("건물 연결 미확인 층별 원자료"):
+            st.dataframe(_floor_rows(unlinked_floors, include_dong=True), hide_index=True, width="stretch")
+
+    with st.expander("서울포털 참고 확인" if not outcome.parsed.is_suwon else "포털 참고 확인"):
+        _render_violation(outcome.parsed)
 
     if snapshot.warnings:
         with st.expander("데이터 연결 주의사항"):
@@ -1632,7 +1629,6 @@ def _render_legacy(outcome: SearchOutcome) -> None:
         "호실면적과 위반 여부는 표시하지 않습니다."
     )
     _render_violation(outcome.parsed)
-    _render_realty_price(outcome.parsed)
     for index, building in enumerate(outcome.legacy):
         _render_legacy_building(building, index)
 
@@ -1653,7 +1649,7 @@ def _render_intro(region: str = "서울") -> None:
         )
     st.caption(
         "제1·2종 근린생활시설, 주택, 오피스텔, 업무시설 등 용도에 관계없이 조회합니다. "
-        "용도·면적·주차·층별 정보와 집합건물 호실별 면적은 공개 API 제공 범위에서 표시됩니다."
+        "건물 용도·면적·주차와 층별 용도·면적을 공개 API 제공 범위에서 표시합니다."
     )
 
 
@@ -1771,17 +1767,15 @@ def render_app() -> None:
         )
         _retry_detail_button(outcome, "건축물 다시 조회")
         _render_violation(outcome.parsed)
-        _render_realty_price(outcome.parsed)
 
     with st.expander("데이터 출처와 확인 범위"):
         st.write(
             "건축HUB 건축물대장정보는 월간 갱신 공개자료입니다. 이 화면은 공식 증명서가 아니며, "
-            "계약·권리분석 등 중요한 판단은 세움터·정부24 발급 대장으로 최종 확인해야 합니다."
+            "건물 용도와 층별 용도·면적을 API에 기록된 값으로 표시합니다."
         )
         st.write(
-            "다가구 호별 면적대장(별지 제9호)과 위반건축물 여부는 건축물대장 공개 API에 없습니다. "
-            "다가구 호별면적은 별도의 건축인허가 이력을 참고값으로만 표시하며, "
-            "없는 값을 0 또는 현재 대장 확정값으로 추정하지 않습니다."
+            "같은 층에 용도·면적이 여러 항목으로 기재되어 있으면 각각 표시합니다. "
+            "응답 지연과 자료 없음을 구분하며, 없는 값을 0으로 추정하지 않습니다."
         )
 
 
