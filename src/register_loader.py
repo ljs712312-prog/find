@@ -5,7 +5,11 @@ from copy import deepcopy
 from threading import Lock, Semaphore, local
 import time
 
-from src.building_hub import BuildingHubError
+from src.building_hub import (
+    BuildingHubError, BuildingHubAPIError, BuildingHubHTTPError,
+    BuildingHubNetworkError, BuildingHubDecodeError, BuildingHubEnvelopeError,
+    BuildingHubPaginationError,
+)
 from src.lookup import BASIS_ENDPOINT, FLOOR_ENDPOINT, LOOKUP_ENDPOINTS, TITLE_ENDPOINT, LookupDataError, lookup_register
 
 
@@ -83,7 +87,7 @@ class _FetchedSections:
         return result
 
 
-def load_register_focus(land_key, client_factory, cache, *, on_update=None):
+def load_register_focus(land_key, client_factory, cache, *, on_update=None, recovery_factory=None):
     """Fetch only titles and floors concurrently; emit titles without waiting.
 
     Request the PK relationship graph only if exact parcel floor rows could not
@@ -91,8 +95,27 @@ def load_register_focus(land_key, client_factory, cache, *, on_update=None):
     """
     def fetch(endpoint):
         def request():
-            with client_factory() as client:
-                return client.fetch_all(endpoint, land_key, num_of_rows=100)
+            try:
+                with client_factory() as client:
+                    rows = client.fetch_all(endpoint, land_key, num_of_rows=100)
+            except BuildingHubError as error:
+                transient = (
+                    isinstance(error, (BuildingHubNetworkError, BuildingHubDecodeError,
+                                       BuildingHubEnvelopeError, BuildingHubPaginationError))
+                    or isinstance(error, (BuildingHubHTTPError, BuildingHubAPIError)) and error.retryable
+                )
+                if recovery_factory is None or not transient:
+                    raise
+                # Recovery stays inside the single-flight owner so concurrent
+                # users share one retry; it never re-fetches successful sections.
+                with recovery_factory() as client:
+                    return client.fetch_all(endpoint, land_key, num_of_rows=100)
+            if not rows and endpoint == TITLE_ENDPOINT and recovery_factory is not None:
+                # Confirm a genuinely empty mandatory section via the documented
+                # alternate serialization; don't confuse a transient blank with no building.
+                with recovery_factory() as client:
+                    return client.fetch_all(endpoint, land_key, num_of_rows=100, response_type="xml")
+            return rows
         return cache.get(endpoint, land_key, request)
 
     sections = {}

@@ -93,6 +93,18 @@ def test_fetches_all_sections_and_rejects_non_exact_land_rows() -> None:
     assert any("정확히 일치하지 않는 2개" in warning for warning in result.warnings)
 
 
+def test_numeric_parcel_fields_accept_equivalent_padding_but_reject_other_parcels():
+    title = {k: int(v) for k, v in LAND_KEY.as_api_params().items()}
+    client = MockClient({TITLE_ENDPOINT: [
+        {**title, "mgmBldrgstPk": "NORMALIZED", "mainPurpsCdNm": "공장"},
+        {**title, "mgmBldrgstPk": "WRONG", "ji": int(LAND_KEY.ji) + 1},
+        {**title, "mgmBldrgstPk": "BOOL", "platGbCd": False},
+    ]})
+    result = lookup_buildings(client, LAND_KEY)
+    assert [b.title_pk for b in result.buildings] == ["NORMALIZED"]
+    assert result.buildings[0].purpose_name == "공장"
+
+
 def test_collective_unit_uses_pk_graph_and_exact_area_join() -> None:
     duplicate_exclusive = land_row(
         mgmBldrgstPk="UNIT-101",

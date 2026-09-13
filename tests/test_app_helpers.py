@@ -160,6 +160,7 @@ def test_metric_cards_split_long_floor_and_household_values() -> None:
     assert _metric_cards(building) == (
         ("층수", "지상 4층", "지하 1층"),
         ("세대 · 가구", "0세대", "8가구"),
+        ("총 호실개수", "확인 불가", "확인 불가"),
         ("주차", "3대", None),
         ("승강기", "1대", None),
     )

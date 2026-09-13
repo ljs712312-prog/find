@@ -171,3 +171,48 @@ app._render_api(st.session_state["result"])
     assert app.dataframe[0].value.loc[0, "동"] == "별동"
     assert app.dataframe[0].value.loc[0, "상세용도"] == "고시원"
     assert app.dataframe[0].value.loc[0, "면적(㎡)"] == "100.8"
+
+
+@pytest.mark.parametrize("endpoint", [TITLE_ENDPOINT, FLOOR_ENDPOINT])
+def test_transient_error_recovers_with_patient_client_in_same_search(endpoint):
+    calls, rescues = Counter(), []
+    class Fast(Client):
+        def fetch_all(self, which, *args, **kwargs):
+            calls[which] += 1
+            if which == endpoint:
+                raise BuildingHubAPIError("05", "timeout", retryable=True)
+            return data(which)
+    class Recovery(Client):
+        def fetch_all(self, which, *args, **kwargs):
+            rescues.append(which)
+            return data(which)
+    cache = RegisterSectionCache(interval=0)
+    result = load_register_focus(LAND, Fast, cache, recovery_factory=Recovery)
+    assert not result.is_partial and result.buildings[0].floors
+    assert rescues == [endpoint]
+    assert load_register_focus(LAND, Fast, cache, recovery_factory=Recovery) == result
+    assert calls == {TITLE_ENDPOINT: 1, FLOOR_ENDPOINT: 1} and rescues == [endpoint]
+
+
+def test_empty_title_is_confirmed_in_xml_and_a_recovered_non_residential_title_is_kept():
+    calls = []
+    class Fast(Client):
+        def fetch_all(self, endpoint, *args, **kwargs):
+            return [] if endpoint == TITLE_ENDPOINT else data(endpoint)
+    class Recovery(Client):
+        def fetch_all(self, endpoint, *args, **kwargs):
+            calls.append((endpoint, kwargs))
+            return data(endpoint)
+    result = load_register_focus(LAND, Fast, RegisterSectionCache(interval=0), recovery_factory=Recovery)
+    assert result.buildings[0].purpose_name == "제2종근린생활시설"
+    assert calls == [(TITLE_ENDPOINT, {"num_of_rows": 100, "response_type": "xml"})]
+
+
+def test_auth_failure_does_not_trigger_recovery():
+    class Denied(Client):
+        def fetch_all(self, endpoint, *args, **kwargs):
+            raise BuildingHubAuthError("30", "denied", retryable=False)
+    def forbidden():
+        pytest.fail("Authentication failures must not be retried on another route")
+    with pytest.raises(BuildingHubAuthError):
+        load_register_focus(LAND, Denied, RegisterSectionCache(interval=0), recovery_factory=forbidden)

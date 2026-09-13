@@ -846,6 +846,25 @@ def test_relay_configuration_can_derive_secret_from_existing_service_key(
     assert KEY not in str(headers)
 
 
+def test_explicit_recovery_route_uses_signed_relay_without_repeating_direct_timeout():
+    session = FakeSession(FakeResponse(payload=api_payload({"id": "recovered"})))
+    client = BuildingHubClient(KEY, session=session, relay_url=RELAY_URL,
+                               relay_hmac_secret=RELAY_SECRET, prefer_relay=True,
+                               relay_timeout=(3.05, 15.0), relay_max_attempts=1)
+    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [{"id": "recovered"}]
+    assert len(session.calls) == 1 and session.calls[0]["method"] == "POST"
+    assert session.calls[0]["timeout"] == (3.05, 15.0)
+    assert KEY not in session.calls[0]["data"]
+
+
+def test_internal_gateway_error_01_is_retried_once():
+    session = FakeSession(FakeResponse(payload=api_payload(None, code="01")),
+                          FakeResponse(payload=api_payload({"id": "ok"})))
+    client = BuildingHubClient(KEY, session=session, max_retries=1, sleep=lambda _: None)
+    assert client.fetch_all("getBrTitleInfo", LAND_DICT) == [{"id": "ok"}]
+    assert len(session.calls) == 2
+
+
 def test_relay_configuration_validation_still_rejects_unsafe_values() -> None:
     with pytest.raises(BuildingHubValidationError, match="HTTPS"):
         BuildingHubClient(

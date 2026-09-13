@@ -19,6 +19,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from enum import Enum
+import re
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol, Sequence
 
 from .address import LandKey
@@ -391,9 +392,9 @@ def _freeze(value: Any) -> Any:
 def _matches_land(row: Mapping[str, Any], land_key: LandKey) -> bool:
     expected = land_key.as_api_params()
     return all(
-        key in row
-        and row[key] is not None
-        and str(row[key]).strip() == expected_value
+        not isinstance(row.get(key), bool)
+        and re.fullmatch(r"[0-9]+", str(row.get(key, "")).strip()) is not None
+        and str(row[key]).strip().zfill(len(expected_value)) == expected_value
         for key, expected_value in expected.items()
     )
 
@@ -451,8 +452,8 @@ def _recoverable_detail_failure(
         return UnavailableEndpoint(endpoint, "rate_limited")
     if isinstance(error, BuildingHubHTTPError) and error.retryable:
         return UnavailableEndpoint(endpoint, "gateway_http")
-    if isinstance(error, BuildingHubAPIError) and error.result_code == "05":
-        return UnavailableEndpoint(endpoint, "service_timeout")
+    if isinstance(error, BuildingHubAPIError) and error.result_code in {"01", "05"}:
+        return UnavailableEndpoint(endpoint, "service_timeout" if error.result_code == "05" else "service_error")
     if isinstance(
         error,
         (BuildingHubDecodeError, BuildingHubEnvelopeError, BuildingHubPaginationError),

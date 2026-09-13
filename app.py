@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from decimal import Decimal
 import hashlib
+import html
 import re
 from threading import Lock, local
 from time import perf_counter
@@ -56,6 +57,7 @@ from src.seoul_search import LotNumber, SeoulLotResult, TitleCache, parse_lot_nu
 from src.seoul_candidates import CandidateSearchError, ParcelCandidates, SeoulCandidateClient
 from src.seoul_road import RoadAddress, RoadSearchResult, SeoulRoadClient, parse_road_address
 from src.register_loader import RegisterSectionCache, load_register_focus
+from src.room_count import total_rooms
 from src.realty_price import (
     COLLECTIVE_HOUSING_PRICE_URL,
     INDIVIDUAL_HOUSING_PRICE_URL,
@@ -72,7 +74,7 @@ from src.vworld import (
 # Bump this whenever cached API response interpretation changes.  Streamlit
 # hashes this argument into each entry, so a hot deploy cannot keep serving a
 # snapshot produced by an older register-mapping rule.
-LOOKUP_CACHE_SCHEMA = "2026-09-12.focus.1"
+LOOKUP_CACHE_SCHEMA = "2026-09-13.recovery.1"
 PERMIT_CACHE_SCHEMA = "2026-08-15.1"
 EAIS_REGISTER_URL = "https://www.eais.go.kr/?actionFlag=archCprtrList"
 PUBLIC_DATA_REQUEST_URL = (
@@ -93,6 +95,7 @@ class SearchOutcome:
     used_legacy: bool = False
     elapsed_seconds: float = 0.0
     first_result_seconds: float = 0.0
+    address_references: tuple[str, ...] = ()
 
 
 def _secret(name: str) -> str | None:
@@ -146,7 +149,11 @@ def _lookup_focus_api(
     return load_register_focus(land_key, lambda: BuildingHubClient(
         _service_key, relay_url=_relay_url, relay_hmac_secret=_relay_hmac_secret,
         max_retries=1, timeout=(2.0, 4.0), relay_timeout=(2.0, 5.0), relay_max_attempts=1,
-    ), cache, on_update=on_update)
+    ), cache, on_update=on_update, recovery_factory=lambda: BuildingHubClient(
+        _service_key, relay_url=_relay_url, relay_hmac_secret=_relay_hmac_secret,
+        max_retries=0, timeout=(3.05, 12.0), relay_timeout=(3.05, 15.0),
+        relay_max_attempts=1, prefer_relay=True,
+    ))
 
 
 @st.cache_data(ttl=6 * 60 * 60, max_entries=256, show_spinner=False)
@@ -238,6 +245,19 @@ def _seoul_candidates_cached(lot: LotNumber) -> ParcelCandidates:
 @st.cache_data(ttl=60 * 60, max_entries=512, show_spinner=False)
 def _seoul_road_cached(address: RoadAddress) -> RoadSearchResult:
     return SeoulRoadClient().find(address)
+
+
+@st.cache_data(ttl=3600, max_entries=256, show_spinner=False)
+def _empty_parcel_addresses(parsed: ParsedAddress) -> tuple[str, ...]:
+    """Address evidence only; never use index documents as register buildings."""
+    key = parsed.land_key
+    pnu = key.legal_dong_code + ("2" if key.plat_gb_cd == "1" else "1") + key.bun + key.ji
+    records = SeoulCandidateClient().search_rows(parsed.canonical_address.removesuffix("번지"))
+    return tuple(sorted({
+        html.unescape(re.sub(r"<[^>]*>", "", str(row.get("ADDR_ROAD") or ""))).strip()
+        for row in records.rows
+        if str(row.get("PNU")) == pnu and row.get("ADDR_ROAD")
+    }))
 
 
 def _lookup_selected_address(query: str, region: str = "서울") -> None:
@@ -550,8 +570,14 @@ def _search(
         except (BuildingHubError, LookupDataError) as error:
             api_error = _friendly_api_error(error)
         else:
+            addresses = ()
+            if not snapshot.buildings and not parsed.is_suwon:
+                try:
+                    addresses = _empty_parcel_addresses(parsed)
+                except CandidateSearchError:
+                    pass  # An address-index outage must not replace the API result.
             return SearchOutcome(parsed=parsed, snapshot=snapshot, elapsed_seconds=perf_counter() - started,
-                                 first_result_seconds=first_result)
+                                 first_result_seconds=first_result, address_references=addresses)
     else:
         api_error = "배포 설정에 건축HUB API 키가 없습니다."
 
@@ -1423,6 +1449,7 @@ def _is_collective_price_building(building: Any) -> bool:
 
 def _metric_cards(
     building: TitleSummary,
+    *, allow_floor_reference: bool = True,
 ) -> tuple[tuple[str, str, str | None], ...]:
     title = building.title
     parking = _sum_int_fields(
@@ -1435,6 +1462,7 @@ def _metric_cards(
         ),
     )
     elevators = _sum_int_fields(title, ("rideUseElvtCnt", "emgenUseElvtCnt"))
+    rooms = total_rooms(building, allow_floor_reference=allow_floor_reference)
     return (
         (
             "층수",
@@ -1446,24 +1474,26 @@ def _metric_cards(
             _count_text(building.household_count, "세대"),
             _count_text(building.family_count, "가구"),
         ),
+        ("총 호실개수", f"{rooms.count}개" if rooms.count is not None else "확인 불가", rooms.source),
         ("주차", _count_text(parking, "대"), None),
         ("승강기", _count_text(elevators, "대"), None),
     )
 
 
-def _render_metrics(building: TitleSummary) -> None:
+def _render_metrics(building: TitleSummary, *, allow_floor_reference: bool = True) -> None:
     # Fixed-width children in a horizontal container wrap onto a new row on
     # narrow screens.  Secondary values keep floor and household pairs clear
     # without forcing two long strings onto a single metric line.
     with st.container(horizontal=True, gap="small"):
-        for label, value, secondary in _metric_cards(building):
+        for label, value, secondary in _metric_cards(building, allow_floor_reference=allow_floor_reference):
             st.metric(
                 label,
                 value,
                 delta=secondary,
                 delta_color="off",
                 delta_arrow="off",
-                width=190,
+                width=160,
+                help=total_rooms(building, allow_floor_reference=allow_floor_reference).note if label == "총 호실개수" else None,
             )
 
 
@@ -1488,7 +1518,7 @@ def _render_building(
         st.subheader(f"{label} · {building.register_group}")
         st.write(f"**지번**  {building.lot_address or '-'}")
         st.write(f"**도로명**  {building.road_address or '정보 없음'}")
-        _render_metrics(building)
+        _render_metrics(building, allow_floor_reference=not (pending_floor or unlinked_floor))
 
         left, right = st.columns(2)
         left.info(f"**주용도**  {building.purpose_name or '-'}")
@@ -1532,13 +1562,29 @@ def _retry_detail_button(outcome: SearchOutcome, label: str) -> None:
 def _render_api(outcome: SearchOutcome) -> None:
     assert outcome.snapshot is not None
     snapshot = outcome.snapshot
-    if outcome.elapsed_seconds:
+    if outcome.elapsed_seconds and snapshot.buildings:
         st.caption(
             f"기본정보 {outcome.first_result_seconds:.1f}초 · "
             f"층별 확인까지 {outcome.elapsed_seconds:.1f}초"
         )
     if not snapshot.buildings:
-        st.error("공식 API 조회 결과가 없습니다. 지번과 산번지 여부를 확인해 주세요.")
+        st.warning(
+            "건축HUB에서 이 지번에 연결되는 건축물대장을 확인하지 못했습니다. "
+            "주택·상가 등 용도로 제외한 결과가 아니며, 건물이 없거나 위반건축물이라는 뜻은 아닙니다."
+        )
+        if outcome.address_references:
+            st.info("서울 주소 검색에서는 아래 도로명 주소가 확인됩니다. 주소 정보와 건축물대장 제공 여부는 다를 수 있습니다.")
+            st.dataframe(pd.DataFrame({"같은 지번에 등록된 도로명 주소": outcome.address_references}), hide_index=True, width="stretch")
+            st.caption("출처: 서울부동산정보광장 주소 검색 · 건물 수나 용도·면적을 확정하는 자료가 아닙니다.")
+        if getattr(snapshot, "unlinked_floors", ()):
+            st.warning("층별 원자료는 받았지만 연결할 건물 기본정보를 확인하지 못해 별도로 표시합니다.")
+            st.dataframe(_floor_rows(snapshot.unlinked_floors, include_dong=True), hide_index=True, width="stretch")
+        with st.expander("조회 상태 자세히"):
+            for stats in getattr(snapshot, "endpoint_stats", ()):
+                label = {"getBrTitleInfo": "건물 기본정보", "getBrFlrOulnInfo": "층별 정보", "getBrBasisOulnInfo": "건물 연결정보"}.get(stats.endpoint, "추가 정보")
+                st.write(f"{label}: 받은 자료 {stats.received_count}건 · 동일 지번 {stats.matched_count}건")
+            for warning in snapshot.warnings:
+                st.write(warning)
         _retry_detail_button(outcome, "건축물 다시 조회")
         _render_violation(outcome.parsed)
         return
