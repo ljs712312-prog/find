@@ -1492,7 +1492,7 @@ def _render_metrics(building: TitleSummary, *, allow_floor_reference: bool = Tru
                 delta=secondary,
                 delta_color="off",
                 delta_arrow="off",
-                width=160,
+                width=190,
                 help=total_rooms(building, allow_floor_reference=allow_floor_reference).note if label == "총 호실개수" else None,
             )
 
