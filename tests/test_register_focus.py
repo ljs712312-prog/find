@@ -216,3 +216,15 @@ def test_auth_failure_does_not_trigger_recovery():
         pytest.fail("Authentication failures must not be retried on another route")
     with pytest.raises(BuildingHubAuthError):
         load_register_focus(LAND, Denied, RegisterSectionCache(interval=0), recovery_factory=forbidden)
+
+
+def test_extra_confirmation_outage_does_not_erase_valid_empty_title():
+    class Empty(Client):
+        def fetch_all(self, endpoint, *args, **kwargs):
+            return []
+    class Unavailable(Client):
+        def fetch_all(self, endpoint, *args, **kwargs):
+            raise BuildingHubAPIError("05", "timeout", retryable=True)
+    result = load_register_focus(LAND, Empty, RegisterSectionCache(interval=0), recovery_factory=Unavailable)
+    assert not result.buildings
+    assert next(s for s in result.endpoint_stats if s.endpoint == TITLE_ENDPOINT).received_count == 0

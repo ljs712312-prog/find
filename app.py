@@ -152,7 +152,7 @@ def _lookup_focus_api(
     ), cache, on_update=on_update, recovery_factory=lambda: BuildingHubClient(
         _service_key, relay_url=_relay_url, relay_hmac_secret=_relay_hmac_secret,
         max_retries=0, timeout=(3.05, 12.0), relay_timeout=(3.05, 15.0),
-        relay_max_attempts=1, prefer_relay=True,
+        relay_max_attempts=1,
     ))
 
 

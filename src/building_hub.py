@@ -194,7 +194,6 @@ class BuildingHubClient:
         relay_hmac_secret: str | None = None,
         relay_timeout: float | tuple[float, float] | None = None,
         relay_max_attempts: int | None = None,
-        prefer_relay: bool = False,
     ) -> None:
         key = str(service_key).strip() if service_key is not None else ""
         if not key:
@@ -217,7 +216,6 @@ class BuildingHubClient:
         self._owns_session = session is None
         self._timeout = timeout
         self._relay_timeout, self._relay_max_attempts = effective_relay_timeout, effective_relay_attempts
-        self._prefer_relay = prefer_relay
         self._max_retries = max_retries
         self._backoff_factor = float(backoff_factor)
         self._max_pages = max_pages
@@ -351,11 +349,6 @@ class BuildingHubClient:
         request_params = dict(params)
         request_params["serviceKey"] = self._service_key
         started_at = time.monotonic()
-
-        if self._prefer_relay and self._relay_config is not None:
-            return self._request_relay_page(
-                endpoint, params, direct_attempts=0, started_at=started_at,
-            )
 
         for attempt in range(self._max_retries + 1):
             try:

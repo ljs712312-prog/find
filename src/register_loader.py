@@ -3,6 +3,7 @@ from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from threading import Lock, Semaphore, local
+import logging
 import time
 
 from src.building_hub import (
@@ -11,6 +12,14 @@ from src.building_hub import (
     BuildingHubPaginationError,
 )
 from src.lookup import BASIS_ENDPOINT, FLOOR_ENDPOINT, LOOKUP_ENDPOINTS, TITLE_ENDPOINT, LookupDataError, lookup_register
+
+
+def _transient(error):
+    return (
+        isinstance(error, (BuildingHubNetworkError, BuildingHubDecodeError,
+                           BuildingHubEnvelopeError, BuildingHubPaginationError))
+        or isinstance(error, (BuildingHubHTTPError, BuildingHubAPIError)) and error.retryable
+    )
 
 
 class RegisterSectionCache:
@@ -99,12 +108,7 @@ def load_register_focus(land_key, client_factory, cache, *, on_update=None, reco
                 with client_factory() as client:
                     rows = client.fetch_all(endpoint, land_key, num_of_rows=100)
             except BuildingHubError as error:
-                transient = (
-                    isinstance(error, (BuildingHubNetworkError, BuildingHubDecodeError,
-                                       BuildingHubEnvelopeError, BuildingHubPaginationError))
-                    or isinstance(error, (BuildingHubHTTPError, BuildingHubAPIError)) and error.retryable
-                )
-                if recovery_factory is None or not transient:
+                if recovery_factory is None or not _transient(error):
                     raise
                 # Recovery stays inside the single-flight owner so concurrent
                 # users share one retry; it never re-fetches successful sections.
@@ -113,8 +117,17 @@ def load_register_focus(land_key, client_factory, cache, *, on_update=None, reco
             if not rows and endpoint == TITLE_ENDPOINT and recovery_factory is not None:
                 # Confirm a genuinely empty mandatory section via the documented
                 # alternate serialization; don't confuse a transient blank with no building.
-                with recovery_factory() as client:
-                    return client.fetch_all(endpoint, land_key, num_of_rows=100, response_type="xml")
+                try:
+                    with recovery_factory() as client:
+                        return client.fetch_all(endpoint, land_key, num_of_rows=100, response_type="xml")
+                except BuildingHubError as error:
+                    if not _transient(error):
+                        raise
+                    # A supplementary confirmation outage must not erase the
+                    # original valid empty response. Empty titles are never cached.
+                    logging.getLogger(__name__).warning(
+                        "Empty title confirmation unavailable kind=%s", type(error).__name__,
+                    )
             return rows
         return cache.get(endpoint, land_key, request)
 
