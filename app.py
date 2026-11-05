@@ -37,7 +37,7 @@ from src.gyeonggi_portal import (
     gyeonggi_portal_url,
 )
 from src.legacy import LegacyBuilding, load_legacy_frames, lookup_legacy
-from src.lookup import LookupDataError, RegisterSnapshot, TitleSummary, UnitSummary, lookup_title_summaries
+from src.lookup import FloorSummary, LookupDataError, RegisterSnapshot, TitleSummary, UnitSummary, lookup_title_summaries
 from src.permit_lookup import (
     PermitAreaCategory,
     PermitCaseReference,
@@ -679,6 +679,28 @@ def _floor_table(building: TitleSummary) -> pd.DataFrame:
     return _floor_rows(building.floors)
 
 
+def _floor_sort_key(floor: FloorSummary) -> tuple[Any, ...]:
+    """Display floors from below ground upwards, preserving source labels."""
+    name = _text(floor.floor_name, "").strip().casefold()
+    group = _text(floor.floor_group_name, "")
+    number = floor.floor_number
+    if number is None:
+        match = re.search(r"-?\d+", name)
+        number = int(match.group()) if match else None
+
+    if (
+        "지하" in name or "지하" in group
+        or re.match(r"^(?:b|지)\s*\d", name)
+        or (number is not None and number < 0)
+    ):
+        return (0, -abs(number or 1), _natural_key(name))
+    if "옥탑" in name or "옥탑" in group or "옥상" in name:
+        return (2, number or 0, _natural_key(name))
+    if number is not None:
+        return (1, number, _natural_key(name))
+    return (3, 0, _natural_key(name))
+
+
 def _floor_rows(floors, *, include_dong: bool = False) -> pd.DataFrame:
     rows = [
         {
@@ -695,9 +717,8 @@ def _floor_rows(floors, *, include_dong: bool = False) -> pd.DataFrame:
             "구조": floor.structure_name or "-",
             "면적(㎡)": _decimal_text(floor.area, suffix="").strip(),
         }
-        for floor in floors
+        for floor in sorted(floors, key=_floor_sort_key)
     ]
-    rows.sort(key=lambda item: _natural_key(item["층"]))
     return pd.DataFrame(rows)
 
 
