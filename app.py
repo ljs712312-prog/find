@@ -689,7 +689,7 @@ def _floor_sort_key(floor: FloorSummary) -> tuple[Any, ...]:
         number = int(match.group()) if match else None
 
     if (
-        "지하" in name or "지하" in group
+        "지하" in name or "지하" in group or name == "지층" or group == "지층"
         or re.match(r"^(?:b|지)\s*\d", name)
         or (number is not None and number < 0)
     ):
