@@ -722,6 +722,72 @@ def _floor_rows(floors, *, include_dong: bool = False) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _render_floor_table(building: TitleSummary) -> None:
+    """Keep floor-header sorting semantic in both directions in the browser."""
+    floors = sorted(building.floors, key=_floor_sort_key)
+    table = _floor_rows(floors)
+    headers = "".join(
+        f'<th scope="col" aria-sort="{"ascending" if i == 0 else "none"}">'
+        f'<button type="button" data-column="{i}">{html.escape(name)}'
+        f'<span aria-hidden="true">{" ↑" if i == 0 else ""}</span></button></th>'
+        for i, name in enumerate(table.columns)
+    )
+    floor_ranks = {key: i for i, key in enumerate(sorted({_floor_sort_key(f) for f in floors}))}
+    body = "".join(
+        f'<tr data-floor="{floor_ranks[_floor_sort_key(floor)]}" data-position="{i}">'
+        + "".join(f"<td>{html.escape(str(value))}</td>" for value in row)
+        + "</tr>"
+        for i, (floor, row) in enumerate(zip(floors, table.itertuples(index=False, name=None)))
+    )
+    markup = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<style>
+*{box-sizing:border-box}body{margin:0;color:#172033;background:#fff;font:14px sans-serif}
+.toolbar{display:flex;justify-content:flex-end;margin:0 0 8px}
+button{font:inherit;color:inherit;cursor:pointer}
+.download{border:1px solid #e0e3e9;border-radius:6px;padding:5px 10px;background:#fff;font-size:12px}
+.frame{overflow:auto;border:1px solid #e0e3e9;border-radius:8px;max-height:450px}
+table{border-collapse:separate;border-spacing:0;width:100%;text-align:left}
+th{position:sticky;top:0;background:#f7f8fa;color:#64748b;font-weight:400;z-index:1}
+th button{display:block;width:100%;padding:10px;border:0;background:transparent;text-align:left;white-space:nowrap}
+th button:focus-visible,.download:focus-visible{outline:2px solid #2563eb;outline-offset:-2px}
+td{padding:9px 10px;white-space:nowrap}th,td{border-right:1px solid #e0e3e9;border-bottom:1px solid #e0e3e9}
+th:last-child,td:last-child{border-right:0}tr:last-child td{border-bottom:0}
+tbody tr:hover{background:#f5f7fb}
+</style></head><body>
+<div class="toolbar"><button class="download" type="button">CSV 내려받기</button></div>
+<div class="frame"><table aria-label="층별 현황"><thead><tr>__HEADERS__</tr></thead><tbody>__BODY__</tbody></table></div>
+<script>
+const table=document.querySelector('table'), tbody=table.tBodies[0];
+const headers=Array.from(table.tHead.rows[0].cells);
+let activeColumn=0, ascending=true;
+headers.forEach((header,column)=>header.querySelector('button').addEventListener('click',()=>{
+  ascending=activeColumn===column ? !ascending : true; activeColumn=column;
+  const rows=Array.from(tbody.rows);
+  rows.sort((a,b)=>{
+    const compared=column===0 ? Number(a.dataset.floor)-Number(b.dataset.floor)
+      : a.cells[column].textContent.localeCompare(b.cells[column].textContent,'ko',{numeric:true});
+    return (ascending ? compared : -compared) || Number(a.dataset.position)-Number(b.dataset.position);
+  });
+  rows.forEach(row=>tbody.appendChild(row));
+  headers.forEach((cell,index)=>{
+    cell.setAttribute('aria-sort',index===column ? (ascending ? 'ascending':'descending'):'none');
+    cell.querySelector('span').textContent=index===column ? (ascending ? ' ↑':' ↓'):'';
+  });
+}));
+document.querySelector('.download').addEventListener('click',()=>{
+  const quote=value=>'"'+value.replaceAll('"','""')+'"';
+  const rows=[headers.map(cell=>cell.querySelector('button').childNodes[0].textContent),
+    ...Array.from(tbody.rows,row=>Array.from(row.cells,cell=>cell.textContent))];
+  const csv='\uFEFF'+rows.map(row=>row.map(quote).join(',')).join('\r\n');
+  const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  const link=document.createElement('a');link.href=url;link.download='층별현황.csv';link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+</script></body></html>"""
+    markup = markup.replace("__HEADERS__", headers).replace("__BODY__", body)
+    st.iframe(markup, height="content")
+
+
 def _unit_table(building: TitleSummary) -> pd.DataFrame:
     rows = [
         {
@@ -1555,11 +1621,7 @@ def _render_building(
 
         if building.floors:
             st.markdown("#### 층별 현황")
-            st.dataframe(
-                _floor_table(building),
-                hide_index=True,
-                width="stretch",
-            )
+            _render_floor_table(building)
         elif pending_floor:
             st.info("층별 용도·면적을 가져오는 중입니다…")
         elif "getBrFlrOulnInfo" in unavailable_endpoints:

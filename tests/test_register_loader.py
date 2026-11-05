@@ -197,5 +197,5 @@ def test_partial_retry_button_preserves_road_mapping_and_restores_details(monkey
     next(b for b in app.button if b.label == "누락된 상세 정보 다시 확인").click().run()
     assert not app.exception and calls == [parsed.canonical_address]
     assert app.session_state[app_module.SEOUL_ROAD_STATE_KEY] == road
-    assert any("74.86" in str(frame.value) for frame in app.dataframe)
+    assert any("<td>74.86</td>" in frame.proto.srcdoc for frame in app.get("iframe"))
     assert not any(b.label == "누락된 상세 정보 다시 확인" for b in app.button)

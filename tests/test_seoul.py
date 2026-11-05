@@ -135,7 +135,7 @@ def test_seoul_ui_renders_commercial_result_and_no_gyeonggi_actions() -> None:
     assert "주차" in [metric.label for metric in app.metric]
     assert "9대" in [metric.value for metric in app.metric]
     assert any("제2종근린생활시설" in info.value for info in app.info)
-    assert any("120.25" in str(frame.value) for frame in app.dataframe)
+    assert any("<td>120.25</td>" in frame.proto.srcdoc for frame in app.get("iframe"))
     labels = [button.label for button in app.button]
     links = {item.label: item.url for item in app.get("link_button")}
     assert "경기부동산포털 1차 확인" not in labels
